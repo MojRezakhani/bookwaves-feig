@@ -29,6 +29,7 @@ public class ConfigLoader {
         private Boolean corsAnyHost;
         private Boolean tagFileLoggingEnabled;
         private String tagFileLoggingPath;
+        private String hostName;
 
         public List<ReaderConfig> getReaders() {
             return readers;
@@ -94,6 +95,14 @@ public class ConfigLoader {
 
         public void setTagFileLoggingPath(String tagFileLoggingPath) {
             this.tagFileLoggingPath = tagFileLoggingPath;
+        }
+
+        public String getHostName(){
+            return hostName;
+        }
+
+        public void setHostName(String hostName){
+            this.hostName = hostName;
         }
     }
 

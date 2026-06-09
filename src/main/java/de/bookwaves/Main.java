@@ -598,6 +598,7 @@ public class Main {
                         readerInfo.put("port", readerConfig.getPort());
                         readerInfo.put("listenerPort", readerConfig.getListenerPort());
                         readerInfo.put("protocol", readerConfig.getProtocol());
+                        readerInfo.put("hostName", ConfigLoader.loadConfiguration().getHostName());
                         readerInfo.put("mode", readerConfig.getMode());
                         readerInfo.put("antennas", readerConfig.getAntennas());
                         readerInfo.put("antennaMask", String.format("0x%02X", readerConfig.getEffectiveAntennaMask()));
