@@ -14,6 +14,7 @@ import de.feig.fedm.ErrorCode;
 import de.feig.fedm.InventoryParam;
 import de.feig.fedm.ReaderModule;
 import de.feig.fedm.RequestMode;
+import de.feig.fedm.RssiItem;
 import de.feig.fedm.TagItem;
 import de.feig.fedm.taghandler.ThBase;
 import de.feig.fedm.taghandler.ThEpcClass1Gen2;
@@ -39,6 +40,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public class Main {
@@ -704,6 +707,9 @@ public class Main {
                                     log.warn("Invalid tag item at index {}", i);
                                     continue;
                                 }
+                                if (readingsKeptByRssiFilter(managedReader.getConfig(), tagItem).isEmpty()) {
+                                    continue;
+                                }
                                 log.debug("Tag {}: {}", i + 1, tagItem.iddToHexString());
                                 //RssiItem
                                 tagItem.rssiValues().forEach(rssiItem -> {
@@ -789,6 +795,7 @@ public class Main {
 
                     try {
                         long inventoryStartNanos = System.nanoTime();
+                        AtomicInteger droppedByRssiFilter = new AtomicInteger();
 
                         // Use executeWithReconnect to handle connection failures automatically
                         List<Tag> tags = managedReader.executeWithReconnect(reader -> {
@@ -817,10 +824,18 @@ public class Main {
 
                             long tagCount = reader.hm().itemCount();
                             List<Tag> result = new ArrayList<>();
+                            droppedByRssiFilter.set(0); // a reconnect retries the whole read
 
                             for (int i = 0; i < tagCount; i++) {
                                 TagItem tagItem = reader.hm().tagItem(i);
                                 if (!tagItem.isValid()) {
+                                    continue;
+                                }
+
+                                Optional<List<Tag.AntennaRssi>> rssiList =
+                                    readingsKeptByRssiFilter(managedReader.getConfig(), tagItem);
+                                if (rssiList.isEmpty()) {
+                                    droppedByRssiFilter.incrementAndGet();
                                     continue;
                                 }
 
@@ -834,16 +849,8 @@ public class Main {
                                     tag = TagFactory.createTagFromHexString(idd);
                                 }
                                 
-                                // Extract and set RSSI values
-                                List<Tag.AntennaRssi> rssiList = new ArrayList<>();
-                                tagItem.rssiValues().forEach(rssiItem -> {
-                                    rssiList.add(new Tag.AntennaRssi(
-                                        rssiItem.antennaNumber(), 
-                                        rssiItem.rssi()
-                                    ));
-                                });
-                                tag.setRssiValues(rssiList);
-                                
+                                tag.setRssiValues(rssiList.get());
+
                                 // Log tag info for debugging
                                 log.debug("Tag: {}, Type: {}, MediaId: {}, Secured: {}", 
                                     tag.getEpcHexString(), tag.getTagType(), tag.getMediaId(), tag.isSecured());
@@ -855,7 +862,8 @@ public class Main {
                         });
 
                         long inventoryDurationMs = (System.nanoTime() - inventoryStartNanos) / 1_000_000;
-                        log.info("Inventory for {} returned {} tags in {} ms", readerName, tags.size(), inventoryDurationMs);
+                        log.info("Inventory for {} returned {} tags ({} dropped by RSSI filter) in {} ms",
+                            readerName, tags.size(), droppedByRssiFilter.get(), inventoryDurationMs);
 
                         ctx.json(new InventoryResponse(true, "Inventory successful", tags.size(), tags));
                     } catch (ReaderManager.ReaderOperationException e) {
@@ -1375,13 +1383,14 @@ public class Main {
                     throw new Exception("Notification listener is not available");
                 }
  
-                TagItem tagItem = listener.getLatestTagItemByEpc(normalizedEpc);
-                if (tagItem == null || !tagItem.isValid()) {
+                NotificationListener.WriteTarget writeTarget = listener.getWriteTargetByEpc(normalizedEpc);
+                if (writeTarget == null || !writeTarget.tagItem().isValid()) {
                     throw new Exception("No notification event TagItem available for EPC " + normalizedEpc +
                         " - wait for a notification event for this EPC and retry");
                 }
 
-                int writeAntenna = listener.lastSeenAntenna(tagItem);
+                TagItem tagItem = writeTarget.tagItem();
+                int writeAntenna = writeTarget.antenna();
                 int resumeAntenna = firstConfiguredAntenna(managedReader.getConfig());
                 log.debug("Notification security op for {}: pause RF (epc={} secure={} writeAntenna={} resumeAntenna={})",
                     readerName, normalizedEpc, secure, writeAntenna, resumeAntenna);
@@ -1600,13 +1609,16 @@ public class Main {
             throw new Exception("Inventory failed: " + reader.lastErrorStatusText());
         }
         
-        if (reader.hm().itemCount() == 0) {
+        // A weak tag on a neighbouring shelf is not "in the field" for this purpose.
+        List<Integer> tagsInField = tagsKeptByRssiFilter(reader, config);
+        if (tagsInField.isEmpty()) {
             throw new Exception("No tag found in field");
         }
 
-        if (reader.hm().itemCount() > 1) {
+        if (tagsInField.size() > 1) {
             throw new Exception("Multiple tags found - please ensure only one tag is in the field");
         }
+        int tagIndex = tagsInField.get(0);
 
         byte[] killPassword = newTag.getKillPassword();
         byte[] accessPassword = newTag.getAccessPassword();
@@ -1641,7 +1653,7 @@ public class Main {
         int totalBlocks = pcAndEpc.length / 2; // PC (1 block) + EPC (variable) blocks
 
         // Get the tag handler
-        try (ThBase handler = reader.hm().createTagHandler(0)) {
+        try (ThBase handler = reader.hm().createTagHandler(tagIndex)) {
             if (!(handler instanceof ThEpcClass1Gen2)) {
                 throw new Exception("Tag is not EPC Gen2 compatible");
             }
@@ -1698,9 +1710,10 @@ public class Main {
                 reader.lastErrorStatusText());
         }
 
-        long postWriteItemCount = reader.hm().itemCount();
+        long postWriteItemCount = tagsKeptByRssiFilter(reader, config).size();
         if (postWriteItemCount == 0) {
-            throw new Exception("No tag found after EPC write - refusing to lock without positive verification");
+            throw new Exception("No tag found after EPC write (or it read weaker than the RSSI filter) - "
+                + "refusing to lock without positive verification");
         }
         if (postWriteItemCount > 1) {
             throw new Exception("Multiple tags found after EPC write (count=" + postWriteItemCount +
@@ -1709,7 +1722,7 @@ public class Main {
 
         // Verify the tag has the correct NEW EPC, verify data by read-back, then lock.
         String expectedEpcHex = newTag.getEpcHexString();
-        try (ThEpcClass1Gen2 freshEpcTag = findTagByEpc(reader, expectedEpcHex)) {
+        try (ThEpcClass1Gen2 freshEpcTag = findTagByEpc(reader, config, expectedEpcHex)) {
             if (freshEpcTag == null) {
                 throw new Exception("Tag EPC verification failed - expected " + expectedEpcHex + " but not found in field");
             }
@@ -1807,7 +1820,7 @@ public class Main {
         }
 
         // Find matching tag
-        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, epcHex)) {
+        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, config, epcHex)) {
             if (epcTag == null) {
                 throw new Exception("Specified tag not found or not EPC Gen2");
             }
@@ -1903,7 +1916,7 @@ public class Main {
 
         // Find the tag with NEW EPC
         String newEpcHex = newTag.getEpcHexString();
-        try (ThEpcClass1Gen2 freshEpcTag = findTagByEpc(reader, newEpcHex)) {
+        try (ThEpcClass1Gen2 freshEpcTag = findTagByEpc(reader, config, newEpcHex)) {
             if (freshEpcTag == null) {
                 throw new Exception("Could not re-select tag with new EPC: " + newEpcHex);
             }
@@ -1947,7 +1960,7 @@ public class Main {
         }
 
         // Find matching tag
-        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, epcHex)) {
+        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, config, epcHex)) {
             if (epcTag == null) {
                 throw new Exception("Specified tag not found or not EPC Gen2");
             }
@@ -2090,7 +2103,7 @@ public class Main {
 
         // Find matching tag once for validation/logging
         log.debug("Searching inventory for EPC {}", epcHex);
-        try (ThEpcClass1Gen2 initialTag = findTagByEpc(reader, epcHex)) {
+        try (ThEpcClass1Gen2 initialTag = findTagByEpc(reader, config, epcHex)) {
             if (initialTag == null) {
                 throw new Exception("Specified tag not found or not EPC Gen2");
             }
@@ -2480,7 +2493,7 @@ public class Main {
         }
 
         // Find matching tag
-        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, epcHex)) {
+        try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, config, epcHex)) {
             if (epcTag == null) {
                 throw new Exception("Specified tag not found or not EPC Gen2");
             }
@@ -2561,12 +2574,57 @@ public class Main {
     }
 
     /**
-     * Find a tag by its EPC hex string in current inventory.
+     * The readings of an inventoried tag that the RSSI filter (software defined) keeps, or
+     * empty when it discards the tag. Only readings with a valid signal strength are judged;
+     * the others are passed through as the reader reported them.
      */
-    private static ThEpcClass1Gen2 findTagByEpc(ReaderModule reader, String epcHex) throws Exception {
+    private static Optional<List<Tag.AntennaRssi>> readingsKeptByRssiFilter(ReaderConfig config, TagItem tagItem) {
+        List<Tag.AntennaRssi> judged = new ArrayList<>();
+        List<Tag.AntennaRssi> unjudged = new ArrayList<>();
+        for (RssiItem rssiItem : tagItem.rssiValues()) {
+            Tag.AntennaRssi reading = new Tag.AntennaRssi(rssiItem.antennaNumber(), rssiItem.rssi());
+            (rssiItem.isValid() ? judged : unjudged).add(reading);
+        }
+        return config.rssiFilter()
+            .filter(tagItem.iddToHexString(), judged, Tag.AntennaRssi::getAntennaNumber, Tag.AntennaRssi::getRssi)
+            .map(kept -> {
+                List<Tag.AntennaRssi> readings = new ArrayList<>(kept);
+                readings.addAll(unjudged);
+                return readings;
+            });
+    }
+
+    /** Indices of the last inventory's tags that the RSSI filter (software defined) keeps. */
+    private static List<Integer> tagsKeptByRssiFilter(ReaderModule reader, ReaderConfig config) {
+        List<Integer> kept = new ArrayList<>();
+        int dropped = 0;
         for (int i = 0; i < reader.hm().itemCount(); i++) {
             TagItem tagItem = reader.hm().tagItem(i);
-            if (tagItem.iddToHexString().equalsIgnoreCase(epcHex)) {
+            if (!tagItem.isValid()) {
+                continue;
+            }
+            if (readingsKeptByRssiFilter(config, tagItem).isPresent()) {
+                kept.add(i);
+            } else {
+                dropped++;
+            }
+        }
+        if (dropped > 0) {
+            log.debug("Inventory for {}: {} tag(s) dropped by RSSI filter", config.getName(), dropped);
+        }
+        return kept;
+    }
+
+    /**
+     * Find a tag by its EPC hex string in current inventory, provided the RSSI filter
+     * (software defined) keeps it.
+     */
+    private static ThEpcClass1Gen2 findTagByEpc(ReaderModule reader, ReaderConfig config, String epcHex)
+            throws Exception {
+        for (int i = 0; i < reader.hm().itemCount(); i++) {
+            TagItem tagItem = reader.hm().tagItem(i);
+            if (tagItem.iddToHexString().equalsIgnoreCase(epcHex)
+                    && readingsKeptByRssiFilter(config, tagItem).isPresent()) {
                 ThBase handler = reader.hm().createTagHandler(i);
                 if (handler instanceof ThEpcClass1Gen2) {
                     return (ThEpcClass1Gen2) handler;
@@ -2681,7 +2739,7 @@ public class Main {
                     log.warn("Read {}[{}] found no tags on attempt {}/{} for EPC {}",
                         bank, startBlock, attempt, attempts, epcHex);
                 } else {
-                    try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, epcHex)) {
+                    try (ThEpcClass1Gen2 epcTag = findTagByEpc(reader, config, epcHex)) {
                         if (epcTag == null) {
                             lastReturnCode = -1;
                             log.warn("Read {}[{}] could not re-select EPC {} on attempt {}/{}",

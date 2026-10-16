@@ -30,6 +30,29 @@ on its own and pushes reads as they happen, which is what a gate or a self-check
 needs. The reader's `OperatingMode.Mode` parameter selects between them, and
 notification mode additionally needs the reader to know this host's address and port.
 
+## Reading tags
+
+**RSSI filter (software defined).** A per-antenna minimum signal strength that this
+service applies to tag reads after the reader has reported them. An antenna's reading
+weaker than its minimum is discarded; a tag none of whose readings survive is discarded
+with it, and counts as not having been seen at all — it neither keeps a tag present nor
+brings it closer to being stable. A reading that carries no signal strength cannot be
+judged: it does not save a tag whose other readings fail, and a tag with only such
+readings passes.
+_Avoid_: RSSI cap, RSSI threshold.
+
+**Reader RSSI filter.** The same per-antenna minimum, enforced by the reader itself
+before it reports a tag. Field testing found it makes reads unstable, which is why the
+software-defined filter exists.
+_Avoid_: hardware filter.
+
+**RSSI filter mode.** Which of the two a reader uses: `software` (the default) or
+`reader`. Never both: in `software` mode a managed reader's own filter is switched off.
+
+Both are configured in −dBm, so a filter of 60 accepts readings down to and including
+−60 dBm, and 0 means no filtering. Reported signal strengths are signed dBm: −42 is
+stronger than −60.
+
 ## Configuration
 
 **Managed and unmanaged.** A reader's `type` in `config.yaml` decides whether this

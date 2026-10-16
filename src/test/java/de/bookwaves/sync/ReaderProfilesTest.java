@@ -200,6 +200,27 @@ class ReaderProfilesTest {
     }
 
     @Test
+    @DisplayName("by default the reader's own RSSI filter is switched off, because this service filters")
+    void softwareFilterSwitchesTheReaderFilterOff() {
+        ReaderConfig config = reader("NewGen", "notification");
+        List<ParamSpec> specs = ReaderProfiles.NEW_GEN.parametersFor(config, "h");
+
+        assertEquals(ParamValue.ofByte(0), desired(specs, "AirInterface.Antenna.UHF.No1.RSSIFilter"));
+        assertEquals(ParamValue.ofByte(0), desired(specs, "AirInterface.Antenna.UHF.No2.RSSIFilter"));
+    }
+
+    @Test
+    @DisplayName("a reader that filters on its own is given the configured RSSI filters")
+    void readerFilterReceivesTheConfiguredValues() {
+        ReaderConfig config = reader("OldGen", "host");
+        config.setRssiFilterMode("reader");
+        List<ParamSpec> specs = ReaderProfiles.OLD_GEN.parametersFor(config, "h");
+
+        assertEquals(ParamValue.ofByte(60), desired(specs, "AirInterface.Antenna.UHF.No1.RSSIFilter"));
+        assertEquals(ParamValue.ofByte(65), desired(specs, "AirInterface.Antenna.UHF.No2.RSSIFilter"));
+    }
+
+    @Test
     @DisplayName("parameters are written as the type the reader stores them as")
     void parameterTypesMatchTheReader() {
         ReaderConfig config = reader("NewGen", "notification");

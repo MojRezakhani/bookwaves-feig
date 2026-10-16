@@ -41,6 +41,9 @@ public record UhfProfile(
     /** How long the reader holds the notification connection open. */
     private static final Duration CONNECTION_HOLD_TIME = Duration.ofSeconds(10);
 
+    /** {@code RSSIFilter} value with which the reader reports every tag it hears. */
+    private static final int READER_RSSI_FILTER_OFF = 0;
+
     /** Clearing this bit makes all antenna ports one reading point. */
     private static final boolean EACH_ANTENNA_PORT_IS_ITS_OWN_READING_POINT = false;
 
@@ -81,12 +84,14 @@ public record UhfProfile(
         List<Integer> antennas = config.getAntennas();
         List<Integer> rssiFilters = config.getRssiFilters();
         List<Double> outputPowers = config.getOutputPowers();
+        // When this service filters, the reader's own filter is switched off; see ADR 0002.
+        boolean readerFilters = config.getEffectiveRssiFilterMode() == RssiFilterMode.READER;
 
         for (int i = 0; i < antennas.size(); i++) {
             int antenna = antennas.get(i);
             specs.add(new ParamSpec(
                 String.format(RSSI_FILTER, antenna),
-                ParamValue.ofByte(rssiFilters.get(i)),
+                ParamValue.ofByte(readerFilters ? rssiFilters.get(i) : READER_RSSI_FILTER_OFF),
                 "RSSI filter for antenna " + antenna));
             specs.add(new ParamSpec(
                 String.format(OUTPUT_POWER, antenna),

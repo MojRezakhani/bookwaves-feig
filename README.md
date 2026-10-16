@@ -71,7 +71,9 @@ See `config.example.yaml` for the complete configuration template.
 - Operating mode: `host` or `notification`
 - Antenna numbers (as array, optional). Do not set for `hf` readers.
 - `type`: `GENERIC` (default), `NewGen` or `OldGen` — see [Configuration sync](#configuration-sync)
-- `rssiFilters`, `outputPowers`: per-antenna settings for synchronised readers
+- `rssiFilters`: per-antenna minimum signal strength, in -dBm — see [RSSI filtering](#rssi-filtering)
+- `rssiFilterMode`: `software` (default) or `reader` — where `rssiFilters` are enforced
+- `outputPowers`: per-antenna output power for synchronised readers
 - `transponderValidTime`, `persistenceResetTime`: tag timings in milliseconds, optional
 - `username`, `password`: reader login, `NewGen` only
 
@@ -142,9 +144,41 @@ readers:
     outputPowers: [0.1, 0.8]    # antenna 1 -> 0.1, antenna 2 -> 0.8
 ```
 
-The three per-antenna lists are positional and must be the same length. An
-`rssiFilters` value is `0` to `255`, in -dBm, and `0` disables filtering for that
-antenna.
+The per-antenna lists are positional. `outputPowers`, and `rssiFilters` when supplied,
+must match the antenna count. In software mode, `rssiFilters` may be omitted to disable
+filtering; managed readers in reader mode require one value per antenna. An
+`rssiFilters` value is `0` to `255`, in -dBm, and `0` disables filtering for that antenna.
+
+#### RSSI filtering
+
+`rssiFilters` keeps tags outside the intended read range from being reported: `60` on
+an antenna discards that antenna's readings weaker than −60 dBm, and keeps a reading of
+exactly −60 dBm. Reported signal strengths are signed dBm, so −42 is stronger than −60.
+
+By default this service applies the filter itself, after the reader has reported a
+tag (`rssiFilterMode: software`). The reader's own RSSI filter made reads unstable in
+field testing, so for a `NewGen` or `OldGen` reader synchronisation switches it off by
+writing `0`. Managed connections must synchronise successfully before use, including
+connections retried after startup. The reasoning is in
+`docs/adr/0002-filter-signal-strength-in-this-service.md`.
+
+- Each antenna's reading is judged against that antenna's filter. A tag is dropped only
+  when none of its readings pass; the readings that do pass are what `rssiValues` shows.
+- The filter applies to every inventory — `/inventory`, and the inventories inside
+  initialise, edit, clear, analyse and secure — so a weak tag on a neighbouring shelf
+  cannot cause "multiple tags found".
+- In notification mode, a dropped read counts as not seen: it neither keeps a tag present
+  nor counts towards `TAG_STABLE`, and immediately revokes its cached write eligibility.
+  Writes select an antenna from the surviving readings.
+- A reading that carries no signal strength is not judged (`/inventory` still lists it in
+  `rssiValues`). A tag with only such readings is let through, and the service logs a
+  warning the first time. For an `OldGen` notification reader, make sure the `RSSI` data
+  selector is on (synchronisation does this).
+- A `GENERIC` reader with `rssiFilters` is filtered too, but its own settings are never
+  touched: set its reader RSSI filter to `0` by hand.
+
+Set `rssiFilterMode: reader` to go back to filtering on the reader. Synchronisation then
+writes `rssiFilters` to the reader and this service filters nothing.
 
 `outputPowers` depends on the generation, and neither has a code for `0`:
 
@@ -214,9 +248,9 @@ readers:
 ```
 
 **What gets written.** For `gate-in` above, 18 parameters: the operating mode; RSSI
-filter and output power per antenna; persistence reset mode and time per antenna; and,
-because it is in notification mode, the multiplexer, selected antennas, four data
-selectors, transponder valid time, and the notification channel's hold time, port and
+filter (`0`, unless `rssiFilterMode: reader`) and output power per antenna; persistence
+reset mode and time per antenna; and, because it is in notification mode, the
+multiplexer, selected antennas, four data selectors, transponder valid time, and the notification channel's hold time, port and
 address. The same reader as `OldGen` is 15 — that generation has no persistence reset,
 and names two data selectors `AntennaNo` and `UID` rather than `Antenna` and `IDD`.
 
@@ -302,7 +336,7 @@ To make an RFID reader work in host mode or notification mode, you need to confi
 #### Both modes
 1. Connect to the reader using ISOStart software or web interface (usually at `https://IP-OF-READER:8443/`)
 2. (Recommended) Configure "AirInterface -> UHF" to reduce the antenna power (loewest for a checkout terminal, higher for a gate)
-3. (Recommended) Also in "AirInterface -> UHF" set a RSSIFilter to ignore weakly read tags (e.g. 40 for a checkout terminal, higher for a gate) to avoid reading tags outside the intended read range
+3. Leave "AirInterface -> UHF -> RSSIFilter" at `0`. Weakly read tags are filtered by this service instead: set `rssiFilters` in `config.yaml` (e.g. 40 for a checkout terminal, higher for a gate) — see [RSSI filtering](#rssi-filtering)
 
 NOTE: Both power and filter need to be tested and adjusted according to the physical setup, antenna gain, and desired read range. Too high power or too low filter values may cause unintended reads of tags outside the intended area.
 

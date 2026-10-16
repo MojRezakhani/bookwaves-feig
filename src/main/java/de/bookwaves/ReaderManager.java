@@ -93,6 +93,7 @@ public class ReaderManager {
         private volatile String lastConnectionError = null;
         private volatile SyncState syncState = SyncState.NEVER_CHECKED;
         private volatile String syncDetail = null;
+        private boolean configurationSyncedForConnection;
 
         public ManagedReader(ReaderConfig config) {
             this.config = config;
@@ -102,6 +103,15 @@ public class ReaderManager {
         }
 
         public synchronized ReaderModule getModule() throws Exception {
+            ReaderModule module = connectModule();
+            if (config.isManaged() && !configurationSyncedForConnection) {
+                syncConfiguration(false);
+            }
+            return module;
+        }
+
+        /** Connects without synchronising, so synchronisation itself can use it. */
+        private ReaderModule connectModule() throws Exception {
             if (readerModule == null) {
                 readerModule = new ReaderModule(RequestMode.UniDirectional);
                 log.debug("Created ReaderModule for {} in UniDirectional mode", config.getName());
@@ -109,6 +119,7 @@ public class ReaderManager {
             }
 
             if (!readerModule.isConnected()) {
+                configurationSyncedForConnection = false;
                 log.debug("Attempting fresh TCP connect to {}", config.getName());
                 int returnCode = readerModule.connect(createConnector());
 
@@ -171,6 +182,7 @@ public class ReaderManager {
          * Useful when the connection is stale or corrupted.
          */
         public synchronized void forceReconnect() throws Exception {
+            configurationSyncedForConnection = false;
             // Close existing module completely
             if (readerModule != null) {
                 try {
@@ -201,6 +213,7 @@ public class ReaderManager {
                                   errorMsg + " (code: " + returnCode + ")");
             }
             
+            getModule(); // Do not expose a reconnected managed reader with stale settings.
             log.info("Successfully reconnected to {}", config.getName());
         }
 
@@ -219,9 +232,10 @@ public class ReaderManager {
                 return new SyncReport(config.getName(), java.util.List.of(), java.util.List.of());
             }
 
+            configurationSyncedForConnection = false;
             ReaderModule module;
             try {
-                module = getModule();
+                module = connectModule();
             } catch (Exception e) {
                 syncState = SyncState.UNREACHABLE;
                 syncDetail = e.getMessage();
@@ -236,6 +250,7 @@ public class ReaderManager {
             try {
                 SyncReport report = sync.apply(
                     new FeigReaderConfigPort(module, config.getName()), config, force);
+                configurationSyncedForConnection = true;
                 syncState = SyncState.IN_SYNC;
                 syncDetail = report.written().isEmpty()
                     ? "configuration matches"
@@ -360,19 +375,16 @@ public class ReaderManager {
             try {
                 lock.lock();
 
-                // Ensure reader is initialized and currently connected
+                // Connect and synchronise before starting notifications.
                 getModule();
-
-                // Nothing else calls a notification reader, so this is where it gets
-                // synchronised if it was unreachable at startup.
-                syncConfiguration(false);
 
                 notificationListener = new NotificationListener(
                     readerModule,
                     1000,
                     lock,
                     config.getAntennas(),
-                    config.isHfProtocol()
+                    config.isHfProtocol(),
+                    config.rssiFilter()
                 );
                 
                 int state = readerModule.async().startNotification(notificationListener);
@@ -498,6 +510,9 @@ public class ReaderManager {
 
         if (config.isHfProtocol()) {
             log.info("HF reader {} registered without configured antennas", config.getName());
+        } else {
+            log.info("Reader {} filters by RSSI in {} mode with rssiFilters {}",
+                config.getName(), config.getEffectiveRssiFilterMode().configValue(), config.getRssiFilters());
         }
 
         try {

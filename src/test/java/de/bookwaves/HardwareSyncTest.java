@@ -153,6 +153,46 @@ class HardwareSyncTest {
         }
     }
 
+    @Order(5)
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("readers")
+    @DisplayName("managed host operations synchronise on first use and after reconnect")
+    void managedConnectionsRepairDrift(ReaderConfig config) throws Exception {
+        Assumptions.assumeFalse(config.isNotificationMode(), "host connection lifecycle only");
+        String parameter = String.format(MUTABLE_PARAMETER, config.getAntennas().get(0));
+        ParamValue desired = desiredValueOf(config, parameter);
+        // Preserve the hardware harness's skip behavior for unavailable readers/native libraries.
+        HardwareReaders.close(HardwareReaders.connect(config));
+        ReaderManager.ManagedReader managed = new ReaderManager.ManagedReader(config);
+        try {
+            ReaderModule module = managed.getModule();
+            ReaderConfigPort port = new FeigReaderConfigPort(module, config.getName());
+            port.readCompleteConfiguration();
+            assertEquals(desired, port.get(parameter, desired.type()));
+            assertEquals(ReaderManager.SyncState.IN_SYNC, managed.getSyncState());
+
+            port.set(parameter, nudge(desired));
+            port.apply(true);
+            managed.forceReconnect();
+            port = new FeigReaderConfigPort(managed.getModule(), config.getName());
+            port.readCompleteConfiguration();
+            assertEquals(desired, port.get(parameter, desired.type()));
+
+            port.set(parameter, nudge(desired));
+            port.apply(true);
+            managed.disconnect();
+            port = new FeigReaderConfigPort(managed.getModule(), config.getName());
+            port.readCompleteConfiguration();
+            assertEquals(desired, port.get(parameter, desired.type()));
+        } finally {
+            try {
+                managed.syncConfiguration(false);
+            } finally {
+                managed.close();
+            }
+        }
+    }
+
     private static ConfigurationSync syncFor(ReaderConfig config) throws Exception {
         return new ConfigurationSync(
             config.getProfile().orElseThrow(), HardwareReaders.hostName(), true);

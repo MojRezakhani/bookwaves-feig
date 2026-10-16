@@ -3,6 +3,7 @@ package de.bookwaves;
 import de.bookwaves.sync.ReaderMode;
 import de.bookwaves.sync.ReaderProfile;
 import de.bookwaves.sync.ReaderProfiles;
+import de.bookwaves.sync.RssiFilterMode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,12 +32,14 @@ public class ReaderConfig {
     private String protocol;
     private List<Integer> antennas = new ArrayList<>();
     private List<Integer> rssiFilters = new ArrayList<>();
+    private String rssiFilterMode;
     private List<Double> outputPowers = new ArrayList<>();
     private String username;
     private String password;
     private String type = ReaderProfiles.GENERIC;
     private String transponderValidTime;
     private String persistenceResetTime;
+    private RssiFilter rssiFilter;
 
     public String getName() {
         return name;
@@ -175,6 +178,35 @@ public class ReaderConfig {
 
     public void setRssiFilters(List<Integer> rssiFilters) {
         this.rssiFilters = rssiFilters == null ? new ArrayList<>() : new ArrayList<>(rssiFilters);
+    }
+
+    /** The raw {@code rssiFilterMode} value from configuration, or null for the default. */
+    public String getRssiFilterMode() {
+        return rssiFilterMode;
+    }
+
+    public void setRssiFilterMode(String rssiFilterMode) {
+        this.rssiFilterMode = rssiFilterMode;
+    }
+
+    /**
+     * Where this reader's {@code rssiFilters} are enforced.
+     *
+     * @throws IllegalArgumentException if {@code rssiFilterMode} names no known mode
+     */
+    public RssiFilterMode getEffectiveRssiFilterMode() {
+        return RssiFilterMode.parse(rssiFilterMode);
+    }
+
+    /**
+     * The RSSI filter (software defined) for this reader's reads. One instance per reader,
+     * so its warnings are issued once rather than on every read.
+     */
+    public synchronized RssiFilter rssiFilter() {
+        if (rssiFilter == null) {
+            rssiFilter = RssiFilter.forReader(this);
+        }
+        return rssiFilter;
     }
 
     public List<Double> getOutputPowers() {

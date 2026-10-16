@@ -1,6 +1,7 @@
 package de.bookwaves;
 
 import de.bookwaves.sync.ReaderProfiles;
+import de.bookwaves.sync.RssiFilterMode;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -112,6 +113,24 @@ class ConfigParsingTest {
         assertEquals(ReaderProfiles.GENERIC, reader.getType());
         assertTrue(reader.getProfile().isEmpty());
         assertTrue(!reader.isManaged());
+    }
+
+    @Test
+    @DisplayName("RSSI filters are enforced by this service unless a reader says otherwise")
+    void rssiFilterModeDefaultsToSoftware() throws Exception {
+        ConfigLoader.Configuration configuration = ConfigLoader.parse(yaml("""
+            readers:
+              - name: filtered-here
+                mode: host
+              - name: filtered-on-the-reader
+                mode: host
+                rssiFilterMode: reader
+            """));
+
+        assertEquals(RssiFilterMode.SOFTWARE,
+            configuration.getReaders().get(0).getEffectiveRssiFilterMode());
+        assertEquals(RssiFilterMode.READER,
+            configuration.getReaders().get(1).getEffectiveRssiFilterMode());
     }
 
     @Test

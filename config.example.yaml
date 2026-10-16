@@ -69,7 +69,15 @@ readerConfigurationPersistent: true
 # output powers depend on the generation; there is no code for 0 in either
 #   NewGen  [0.1, 0.2, ... , 0.9, 1.0]
 #   OldGen  [0.05, 0.1, 0.2, 0.3, 0.4, 0.5]; 0.5 is that reader's full power
-# rssiFilter is 0..255 in -dBm; value 0 deactivates filtering by rssi
+# rssiFilter is 0..255 in -dBm; value 0 deactivates filtering by rssi. 60 drops
+# readings weaker than -60 dBm on that antenna.
+#
+# rssiFilterMode is optional: software (default) or reader
+#   software  this service drops weak readings after the reader reports them, and
+#             synchronisation switches the reader's own RSSI filter off (writes 0).
+#             A GENERIC reader is filtered too; switch its own filter off by hand.
+#   reader    the reader filters (the old behaviour, which made reads unstable in
+#             field testing) and this service does not
 #
 # transponderValidTime and persistenceResetTime are optional, in milliseconds, and
 # default to 1000. Both also accept `never`.

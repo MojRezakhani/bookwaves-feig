@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.time.LocalDateTime;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -40,8 +41,7 @@ public class NotificationListener implements IReaderListener, IConnectListener {
     private static final long PRESENCE_SWEEP_INTERVAL_MS = 500L;
     private static final int MIN_STABLE_OBSERVATIONS = 3;
     private static final long MIN_STABLE_DURATION_MS = 750L;
-    private static final int MAX_STABLE_RSSI = 39;
-    
+
     private static final Logger log = LoggerFactory.getLogger(NotificationListener.class);
     private final ReaderModule reader;
     private final ConcurrentLinkedQueue<NotificationEvent> eventQueue;
@@ -50,16 +50,20 @@ public class NotificationListener implements IReaderListener, IConnectListener {
     private final int maxQueueSize;
     private final Lock lock;
     private final boolean hfProtocol;
-    private final ConcurrentHashMap<String, TagItem> latestTagItemsByEpc = new ConcurrentHashMap<>();
+    public record WriteTarget(TagItem tagItem, int antenna) {}
+
+    private final ConcurrentHashMap<String, WriteTarget> writeTargetsByEpc = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, PresenceState> presenceByEpc = new ConcurrentHashMap<>();
     private final CopyOnWriteArrayList<Consumer<NotificationEvent>> eventSubscribers = new CopyOnWriteArrayList<>();
     private final Set<Integer> allowedAntennas;
+    private final RssiFilter rssiFilter;
     private final ScheduledExecutorService presenceSweepExecutor;
     private final AtomicLong removedEventCount = new AtomicLong(0);
 
     public NotificationListener(ReaderModule reader, int maxQueueSize, Lock lock, List<Integer> configuredAntennas,
-                                boolean hfProtocol) {
+                                boolean hfProtocol, RssiFilter rssiFilter) {
         this.reader = reader;
+        this.rssiFilter = rssiFilter;
         this.maxQueueSize = maxQueueSize;
         this.eventQueue = new ConcurrentLinkedQueue<>();
         this.eventCount = new AtomicInteger(0);
@@ -90,8 +94,8 @@ public class NotificationListener implements IReaderListener, IConnectListener {
         log.info("Notification antenna filter active: {}", this.allowedAntennas.isEmpty() ? "none" : this.allowedAntennas);
         log.info("Notification presence timeout active: {} ms (sweep every {} ms)",
             PRESENCE_TIMEOUT_MS, PRESENCE_SWEEP_INTERVAL_MS);
-        log.info("Notification stability criteria active: minObservations={} minDurationMs={} maxStableRssi={}",
-            MIN_STABLE_OBSERVATIONS, MIN_STABLE_DURATION_MS, MAX_STABLE_RSSI);
+        log.info("Notification stability criteria active: minObservations={} minDurationMs={}",
+            MIN_STABLE_OBSERVATIONS, MIN_STABLE_DURATION_MS);
     }
 
     @Override
@@ -206,14 +210,20 @@ public class NotificationListener implements IReaderListener, IConnectListener {
             event.hfBlockCount = hfDataBlocks.blockCount;
             event.hfBlocksHex = hfDataBlocks.blocksHex;
         }
-        latestTagItemsByEpc.put(event.epc.toUpperCase(Locale.ROOT), tagItem);
-
-        // Keep old/new-reader event handling consistent and reuse antenna filtering.
-        List<NotificationEvent.AntennaRssi> rssiList = extractAllowedRssiValues(tagItem);
-        if (shouldDropByAntennaFilter(tagItem, rssiList)) {
-            log.debug("Dropped {} {} due to non-configured antenna RSSI values", sourceLogName, event.epc);
+        // Invalid RSSI items are unjudgeable, not evidence of a disallowed antenna.
+        List<NotificationEvent.AntennaRssi> validReadings = new ArrayList<>();
+        for (RssiItem rssiItem : tagItem.rssiValues()) {
+            if (rssiItem.isValid()) {
+                validReadings.add(new NotificationEvent.AntennaRssi(rssiItem.antennaNumber(), rssiItem.rssi()));
+            }
+        }
+        Optional<List<NotificationEvent.AntennaRssi>> strongEnough =
+            filterObservation(event.epc, tagItem, validReadings);
+        if (strongEnough.isEmpty()) {
+            log.debug("Dropped {} {} because no reading survived the antenna and RSSI filters", sourceLogName, event.epc);
             return;
         }
+        List<NotificationEvent.AntennaRssi> rssiList = strongEnough.get();
 
         event.rssiValues = rssiList;
         event.readerTimestamp = readerTimestamp;
@@ -228,29 +238,27 @@ public class NotificationListener implements IReaderListener, IConnectListener {
                 .orElse("none"));
     }
 
-    private List<NotificationEvent.AntennaRssi> extractAllowedRssiValues(TagItem tagItem) {
-        List<NotificationEvent.AntennaRssi> rssiList = new ArrayList<>();
-        for (RssiItem rssiItem : tagItem.rssiValues()) {
-            if (rssiItem.isValid()) {
-                int antennaNumber = rssiItem.antennaNumber();
-                if (allowedAntennas.isEmpty() || allowedAntennas.contains(antennaNumber)) {
-                    rssiList.add(new NotificationEvent.AntennaRssi(
-                        antennaNumber,
-                        rssiItem.rssi()
-                    ));
-                }
+    /** Filters valid readings and keeps write eligibility in step with the latest observation. */
+    Optional<List<NotificationEvent.AntennaRssi>> filterObservation(
+        String epc, TagItem tagItem, List<NotificationEvent.AntennaRssi> validReadings
+    ) {
+        List<NotificationEvent.AntennaRssi> allowed = new ArrayList<>();
+        for (NotificationEvent.AntennaRssi reading : validReadings) {
+            if (allowedAntennas.isEmpty() || allowedAntennas.contains(reading.antennaNumber)) {
+                allowed.add(reading);
             }
         }
-        return rssiList;
-    }
-
-    private boolean shouldDropByAntennaFilter(TagItem tagItem, List<NotificationEvent.AntennaRssi> rssiList) {
-        return !allowedAntennas.isEmpty() && !tagItem.rssiValues().isEmpty() && rssiList.isEmpty();
-    }
-
-    /** The antenna the tag was last reported on, or 0 when the notification named none. */
-    public int lastSeenAntenna(TagItem tagItem) {
-        return tagItem == null ? 0 : strongestAntenna(extractAllowedRssiValues(tagItem));
+        Optional<List<NotificationEvent.AntennaRssi>> kept = !validReadings.isEmpty() && allowed.isEmpty()
+            ? Optional.empty()
+            : rssiFilter.filter(epc, allowed, reading -> reading.antennaNumber, reading -> reading.rssi);
+        String normalizedEpc = epc.toUpperCase(Locale.ROOT);
+        if (kept.isPresent()) {
+            writeTargetsByEpc.put(normalizedEpc, new WriteTarget(tagItem, strongestAntenna(kept.get())));
+        } else {
+            // Presence still expires normally, but a rejected observation revokes write eligibility now.
+            writeTargetsByEpc.remove(normalizedEpc);
+        }
+        return kept;
     }
 
     /**
@@ -292,11 +300,11 @@ public class NotificationListener implements IReaderListener, IConnectListener {
         }
     }
 
-    public TagItem getLatestTagItemByEpc(String epcHex) {
+    public WriteTarget getWriteTargetByEpc(String epcHex) {
         if (epcHex == null || epcHex.isBlank()) {
             return null;
         }
-        return latestTagItemsByEpc.get(epcHex.toUpperCase(Locale.ROOT));
+        return writeTargetsByEpc.get(epcHex.toUpperCase(Locale.ROOT));
     }
 
     private void processIdentificationEvent() {
@@ -341,9 +349,9 @@ public class NotificationListener implements IReaderListener, IConnectListener {
             state.lastPc = event.pc;
 
             long presenceDurationMs = Math.max(0L, nowMillis - state.firstSeenMillis);
+            // Signal strength is not judged here: reads the RSSI filter discarded never arrive.
             boolean isStableNow = state.seenCount >= MIN_STABLE_OBSERVATIONS
-                && presenceDurationMs >= MIN_STABLE_DURATION_MS
-                && state.lastBestRssi <= MAX_STABLE_RSSI;
+                && presenceDurationMs >= MIN_STABLE_DURATION_MS;
 
             state.stable = isStableNow;
 
@@ -407,7 +415,7 @@ public class NotificationListener implements IReaderListener, IConnectListener {
                 continue;
             }
 
-            latestTagItemsByEpc.remove(epc);
+            writeTargetsByEpc.remove(epc);
 
             if (state.stable) {
                 NotificationEvent unstableEvent = new NotificationEvent();
@@ -673,6 +681,7 @@ public class NotificationListener implements IReaderListener, IConnectListener {
     public void close() {
         presenceSweepExecutor.shutdownNow();
         presenceByEpc.clear();
+        writeTargetsByEpc.clear();
     }
 
     private void addEvent(NotificationEvent event) {

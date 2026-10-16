@@ -117,6 +117,108 @@ class ConfigLoaderValidationTest {
     }
 
     @Test
+    @DisplayName("an unrecognised RSSI filter mode is rejected with the supported ones")
+    void unknownRssiFilterModeIsRejected() {
+        ReaderConfig config = managedReader();
+        config.setRssiFilterMode("both");
+
+        String message = messageOf(config);
+        assertTrue(message.contains("both"), message);
+        assertTrue(message.contains("software, reader"), message);
+    }
+
+    /** A reader this service leaves alone, though it still filters its reads. */
+    private static ReaderConfig unmanagedReader() {
+        ReaderConfig config = new ReaderConfig();
+        config.setName("reader3");
+        config.setAddress("192.168.1.102");
+        config.setPort(10001);
+        config.setMode("host");
+        return config;
+    }
+
+    @Test
+    @DisplayName("an unmanaged reader without RSSI filters is accepted")
+    void unmanagedReaderNeedsNoFilters() {
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(unmanagedReader())));
+    }
+
+    @Test
+    @DisplayName("an unmanaged reader filtered in software needs one RSSI filter per antenna")
+    void unmanagedSoftwareFilterMustMatchAntennas() {
+        ReaderConfig config = unmanagedReader();
+        config.setAntennas(List.of(1, 2));
+        config.setRssiFilters(List.of(60));
+
+        assertTrue(messageOf(config).contains("rssiFilters"), messageOf(config));
+    }
+
+    @Test
+    @DisplayName("an unmanaged software filter rejects invalid antenna entries at load")
+    void unmanagedSoftwareFilterValidatesAntennas() {
+        for (Integer antenna : Arrays.asList(null, 0, 9)) {
+            ReaderConfig config = unmanagedReader();
+            config.setAntennas(Arrays.asList(1, antenna));
+            config.setRssiFilters(List.of(60, 60));
+
+            assertTrue(messageOf(config).contains("out of range"));
+        }
+    }
+
+    @Test
+    @DisplayName("unmanaged readers retain support for the eight-port antenna mask")
+    void unmanagedSoftwareFilterAcceptsEightPorts() {
+        ReaderConfig config = unmanagedReader();
+        config.setAntennas(List.of(8));
+        config.setRssiFilters(List.of(60));
+
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(config)));
+    }
+
+    @Test
+    @DisplayName("a managed reader filtered in software may leave out RSSI filters")
+    void managedSoftwareFilterIsOptional() {
+        ReaderConfig config = managedReader();
+        config.setRssiFilters(List.of());
+
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(config)));
+    }
+
+    @Test
+    @DisplayName("a managed reader that filters on its own still needs one RSSI filter per antenna")
+    void managedReaderFilterIsRequired() {
+        ReaderConfig config = managedReader();
+        config.setRssiFilterMode("reader");
+        config.setRssiFilters(List.of());
+
+        assertTrue(messageOf(config).contains("rssiFilters"), messageOf(config));
+    }
+
+    @Test
+    @DisplayName("RSSI filters nothing acts on are not checked")
+    void unusedRssiFiltersAreIgnored() {
+        // Unmanaged and filtering on the reader: neither this service nor sync uses them.
+        ReaderConfig config = unmanagedReader();
+        config.setRssiFilterMode("reader");
+        config.setAntennas(List.of(1, 2));
+        config.setRssiFilters(List.of(60));
+
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(config)));
+    }
+
+    @Test
+    @DisplayName("an HF reader cannot be given RSSI filters")
+    void hfReaderHasNoRssiFilters() {
+        ReaderConfig config = unmanagedReader();
+        config.setProtocol("hf");
+        config.setRssiFilters(List.of(60));
+
+        String message = messageOf(config);
+        assertTrue(message.contains("rssiFilters"), message);
+        assertTrue(message.contains("hf"), message);
+    }
+
+    @Test
     @DisplayName("an unrecognised mode is rejected at load")
     void unknownModeIsRejected() {
         ReaderConfig config = managedReader();

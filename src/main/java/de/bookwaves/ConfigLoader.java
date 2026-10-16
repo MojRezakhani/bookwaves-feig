@@ -3,6 +3,7 @@ package de.bookwaves;
 import de.bookwaves.sync.OutputPowerCodec;
 import de.bookwaves.sync.ReaderMode;
 import de.bookwaves.sync.ReaderProfile;
+import de.bookwaves.sync.RssiFilterMode;
 import de.bookwaves.sync.TagTiming;
 
 import org.slf4j.Logger;
@@ -220,6 +221,12 @@ public class ConfigLoader {
             throw new Exception("Invalid reader configuration for '" + name + "': " + e.getMessage());
         }
 
+        try {
+            reader.getEffectiveRssiFilterMode();
+        } catch (IllegalArgumentException e) {
+            throw new Exception("Invalid reader configuration for '" + name + "': " + e.getMessage());
+        }
+
         Optional<ReaderProfile> profile;
         try {
             profile = reader.getProfile();
@@ -237,7 +244,16 @@ public class ConfigLoader {
                 + "': antennas must not be configured when protocol is hf");
         }
 
+        if (reader.isHfProtocol() && !reader.getRssiFilters().isEmpty()) {
+            throw new Exception("Invalid reader configuration for '" + name
+                + "': rssiFilters must not be configured when protocol is hf");
+        }
+
         if (profile.isEmpty()) {
+            if (rssiFiltersInUse(reader)) {
+                validateAntennas(reader.getAntennas(), name, 8);
+                validateRssiFilters(reader, name);
+            }
             return;
         }
 
@@ -253,7 +269,6 @@ public class ConfigLoader {
     private static void validateManagedReader(ReaderConfig reader, String name, ReaderProfile profile)
             throws Exception {
         List<Integer> antennas = reader.getAntennas();
-        List<Integer> rssiFilters = reader.getRssiFilters();
         List<Double> outputPowers = reader.getOutputPowers();
 
         if (antennas.isEmpty()) {
@@ -261,22 +276,12 @@ public class ConfigLoader {
                 + "': at least one antenna must be configured for type " + profile.id());
         }
 
-        for (Integer antenna : antennas) {
-            if (antenna == null || antenna < 1 || antenna > MAX_ANTENNA) {
-                throw new Exception("Invalid reader configuration for '" + name
-                    + "': antenna " + antenna + " is out of range 1.." + MAX_ANTENNA);
-            }
-        }
+        validateAntennas(antennas, name, MAX_ANTENNA);
 
-        requireMatchingLength(name, "rssiFilters", rssiFilters.size(), antennas.size());
+        if (rssiFiltersInUse(reader)) {
+            validateRssiFilters(reader, name);
+        }
         requireMatchingLength(name, "outputPowers", outputPowers.size(), antennas.size());
-
-        for (Integer filter : rssiFilters) {
-            if (filter == null || filter < 0 || filter > MAX_RSSI_FILTER) {
-                throw new Exception("Invalid reader configuration for '" + name
-                    + "': rssiFilter " + filter + " is out of range 0.." + MAX_RSSI_FILTER);
-            }
-        }
 
         // Maximum power differs per generation.
         OutputPowerCodec codec = profile.outputPowerCodec();
@@ -312,6 +317,40 @@ public class ConfigLoader {
             throw new Exception("Invalid reader configuration for '" + name + "': "
                 + timing.key() + " " + value + " is not supported; accepted are "
                 + timing.supportedValues());
+        }
+    }
+
+    /**
+     * Whether anything acts on this reader's {@code rssiFilters}: this service when it
+     * filters in software and some are set, synchronisation when the reader filters and
+     * is managed. Unused filters are not checked.
+     */
+    private static boolean rssiFiltersInUse(ReaderConfig reader) {
+        if (reader.getEffectiveRssiFilterMode() == RssiFilterMode.SOFTWARE) {
+            return !reader.getRssiFilters().isEmpty();
+        }
+        return reader.isManaged();
+    }
+
+    private static void validateAntennas(List<Integer> antennas, String name, int maximum) throws Exception {
+        for (Integer antenna : antennas) {
+            if (antenna == null || antenna < 1 || antenna > maximum) {
+                throw new Exception("Invalid reader configuration for '" + name
+                    + "': antenna " + antenna + " is out of range 1.." + maximum);
+            }
+        }
+    }
+
+    /** Checks that every antenna has one RSSI filter the reader could store. */
+    private static void validateRssiFilters(ReaderConfig reader, String name) throws Exception {
+        List<Integer> rssiFilters = reader.getRssiFilters();
+        requireMatchingLength(name, "rssiFilters", rssiFilters.size(), reader.getAntennas().size());
+
+        for (Integer filter : rssiFilters) {
+            if (filter == null || filter < 0 || filter > MAX_RSSI_FILTER) {
+                throw new Exception("Invalid reader configuration for '" + name
+                    + "': rssiFilter " + filter + " is out of range 0.." + MAX_RSSI_FILTER);
+            }
         }
     }
 
