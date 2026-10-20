@@ -1,0 +1,1000 @@
+# Feig RFID Reader Service
+
+A Java-based RFID reader service using the Feig SDK, providing REST API endpoints for tag operations and multi-reader management. It can be used as a middleware for [BookWaves](https://github.com/lukaslerche/bookwaves).
+
+## Features
+
+- **Multi-reader support** - Manage multiple RFID readers simultaneously
+- **Auto-detection** - Supports DE290, DE290F, DE386, DE385, DELAN1, DE6, and BR tag formats
+- **Configurable passwords** - Per-tag-type password management
+- **Host & Notification modes** - Support for both polling and event-driven tag detection
+- **Tag initialization** - Write new tags with proper format and security
+- **Tag editing** - Update media IDs on existing tags
+- **Security operations** - Lock/unlock, secure/unsecure tags
+- **Tag analysis** - Deep inspection of tag memory and security status
+
+## Quick Start (Docker)
+
+The easiest way to run the service is using the pre-built Docker image:
+
+### 1. Create Configuration File
+
+**IMPORTANT:** This application requires an external configuration file. No default configuration is embedded.
+
+```bash
+# Copy the example configuration
+cp config.example.yaml config.yaml
+
+# Edit config.yaml with your reader details and passwords
+```
+
+**Never commit `config.yaml` to version control** (it contains sensitive passwords)
+
+### 2. Run with Docker
+
+```bash
+docker run -d \
+  -p 7070:7070 \
+  -p 20001-20020:20001-20020 \
+  -v $(pwd)/config.yaml:/app/config/config.yaml:ro \
+  ghcr.io/lukaslerche/bookwaves-feig:latest
+```
+
+Or use Docker Compose with the provided `docker-compose.yml`:
+
+```bash
+docker compose up -d
+```
+
+The service will be available at `http://localhost:7070`
+
+## Configuration
+
+### Configuration File Format
+
+See `config.example.yaml` for the complete configuration template.
+
+**Tag passwords by type:**
+- `DE290Tag.access` / `DE290Tag.kill` - For DE290 tags
+- `DE6Tag.access` / `DE6Tag.kill` - For DE6 tags
+- `DE386Tag.access` / `DE386Tag.kill` - For DE386 tags
+- `DE385Tag.access` / `DE385Tag.kill` - For DE385 tags
+- `DELAN1Tag.access` / `DELAN1Tag.kill` - For DELAN1 tags
+- `BRTag.secret` - For BR (Smartfreq) tags
+
+**Default tag format** - Used for tag initialization (DE290, DE6, DE290F, DE386, DE385, or DELAN1)
+
+**Reader configurations:**
+- Name, IP address, port
+- Protocol: optional; `uhf` is used when omitted, or set `hf`
+- Listener port (`listenerPort`) for reader push notifications to this service. Required in `notification` mode.
+- Operating mode: `host` or `notification`
+- Antenna numbers (as array, optional). Do not set for `hf` readers.
+- `type`: `GENERIC` (default), `NewGen` or `OldGen` — see [Configuration sync](#configuration-sync)
+- `rssiFilters`: per-antenna minimum signal strength, in -dBm — see [RSSI filtering](#rssi-filtering)
+- `rssiFilterMode`: `software` (default) or `reader` — where `rssiFilters` are enforced
+- `outputPowers`: per-antenna output power for synchronised readers
+- `transponderValidTime`, `persistenceResetTime`: tag timings in milliseconds, optional
+- `username`, `password`: reader login, `NewGen` only
+
+**Top-level keys:**
+- `hostName` - the address readers dial back to in notification mode. Written to synchronised notification readers so they know where to send tag reads. Leave unset to configure the reader's target address by hand.
+- `readerConfigurationPersistent` - whether configuration written to a reader is stored in its EEPROM. Defaults to `true`. Leave it there: no tested reader honours `false`, and the parameters survive a power cycle either way.
+
+### Configuration sync
+
+For readers with a `type` of `NewGen` or `OldGen`, `config.yaml` is the single source of
+truth. When the service connects to such a reader it reads the reader's live
+configuration, compares it parameter by parameter, and rewrites **only the parameters
+that differ**. A reader that already matches is not written to at all.
+
+| `type` | Hardware | Parameter tree | Login | Persistence reset |
+| --- | --- | --- | --- | --- |
+| `GENERIC` | any | not managed | - | - |
+| `NewGen` | e.g. MRU400X | `OperatingMode.AutoReadModes` | yes | yes |
+| `OldGen` | e.g. MRU102 | `OperatingMode.NotificationMode` | no | no |
+
+Synchronisation happens when a reader is registered at startup, and again when a
+notification reader's listener starts. A reader that is unreachable at startup — for
+example because PoE to it is switched off — is registered anyway and synchronised on the
+next connection; it does not stop the service or the other readers from starting.
+
+To resynchronise on demand:
+
+```bash
+curl -X POST http://localhost:7070/readers/reader2/sync
+curl -X POST "http://localhost:7070/readers/reader2/sync?force=true"   # rewrite every parameter
+```
+
+`GET /readers` reports each reader's `syncState`, one of `UNMANAGED`, `NEVER_CHECKED`,
+`UNREACHABLE`, `IN_SYNC` or `DRIFTED`.
+
+**Not written, ever.** The reader's own IP address, hostname and any access-protection or
+credential parameter are refused by the synchronisation engine. Changing a reader's
+address from here could put it beyond reach of the host that would have to change it
+back, and a credential change can lock the reader in a way only the manufacturer can
+undo. Set those through ISOStart or the reader's web interface.
+
+**Host mode is covered too.** A `NewGen` or `OldGen` reader in host mode has everything
+under [Host mode configuration](#host-mode-configuration) synchronised. It gets no
+notification settings, because it has none: the data selectors, the transponder valid
+time and the notification target only exist to describe notifications, and a host mode
+read names the antennas it wants in the inventory command rather than through the
+antenna multiplexer.
+
+### Configuration sync examples
+
+A managed notification reader. `hostName` and `listenerPort` together tell the reader
+where to send tag reads, so both must be right or notifications never arrive.
+
+```yaml
+hostName: "192.168.1.10"        # this host, as the reader can reach it
+
+readers:
+  - name: gate-in
+    type: NewGen
+    address: 192.168.1.101
+    port: 10001                 # port this service connects to on the reader
+    listenerPort: 20001         # port the reader connects back to on this host
+    mode: notification
+    username: admin
+    password: "CHANGE-ME"
+    antennas: [1, 2]
+    rssiFilters: [60, 65]       # antenna 1 -> 60, antenna 2 -> 65
+    outputPowers: [0.1, 0.8]    # antenna 1 -> 0.1, antenna 2 -> 0.8
+```
+
+The per-antenna lists are positional. `outputPowers`, and `rssiFilters` when supplied,
+must match the antenna count. In software mode, `rssiFilters` may be omitted to disable
+filtering; managed readers in reader mode require one value per antenna. An
+`rssiFilters` value is `0` to `255`, in -dBm, and `0` disables filtering for that antenna.
+
+#### RSSI filtering
+
+`rssiFilters` keeps tags outside the intended read range from being reported: `60` on
+an antenna discards that antenna's readings weaker than −60 dBm, and keeps a reading of
+exactly −60 dBm. Reported signal strengths are signed dBm, so −42 is stronger than −60.
+
+By default this service applies the filter itself, after the reader has reported a
+tag (`rssiFilterMode: software`). The reader's own RSSI filter made reads unstable in
+field testing, so for a `NewGen` or `OldGen` reader synchronisation switches it off by
+writing `0`. Managed connections must synchronise successfully before use, including
+connections retried after startup. The reasoning is in
+`docs/adr/0002-filter-signal-strength-in-this-service.md`.
+
+- Each antenna's reading is judged against that antenna's filter. A tag is dropped only
+  when none of its readings pass; the readings that do pass are what `rssiValues` shows.
+- The filter applies to every inventory — `/inventory`, and the inventories inside
+  initialise, edit, clear, analyse and secure — so a weak tag on a neighbouring shelf
+  cannot cause "multiple tags found".
+- In notification mode, a dropped read counts as not seen: it neither keeps a tag present
+  nor counts towards `TAG_STABLE`, and immediately revokes its cached write eligibility.
+  Writes select an antenna from the surviving readings.
+- A reading that carries no signal strength is not judged (`/inventory` still lists it in
+  `rssiValues`). A tag with only such readings is let through, and the service logs a
+  warning the first time. For an `OldGen` notification reader, make sure the `RSSI` data
+  selector is on (synchronisation does this).
+- A `GENERIC` reader with `rssiFilters` is filtered too, but its own settings are never
+  touched: set its reader RSSI filter to `0` by hand.
+
+Set `rssiFilterMode: reader` to go back to filtering on the reader. Synchronisation then
+writes `rssiFilters` to the reader and this service filters nothing.
+
+`outputPowers` depends on the generation, and neither has a code for `0`:
+
+| type | accepted values |
+|------|-----------------|
+| `NewGen` | `0.1` to `1.0` in steps of `0.1` |
+| `OldGen` | `0.05`, `0.1`, `0.2`, `0.3`, `0.4`, `0.5` — `0.5` is that reader's full power |
+
+A value is checked against the generation that has to store it, so `1.0` is accepted
+for a `NewGen` reader and rejected for an `OldGen` one.
+
+### Tag timings
+
+Two optional per-reader keys tune how the reader treats a tag it has already seen.
+Both are in **milliseconds** and default to `1000`:
+
+| key | what it sets | accepted values |
+|-----|--------------|-----------------|
+| `transponderValidTime` | how long before the same tag is reported again | `0` to `6553400`, in whole steps of `100`, or `never` |
+| `persistenceResetTime` | how long after a read the reader resets a tag's persistence flags | `0` to `327670`, in whole steps of `5`, or `never` |
+
+`never` asks the reader to report a tag only once, or never to reset persistence. A
+value the reader cannot count in whole steps is rejected at load rather than rounded,
+so a busy gate and a quiet self-checkout can be tuned without guessing what the reader
+stored. `OldGen` has no persistence reset and ignores `persistenceResetTime`, which is
+logged as a warning.
+
+```yaml
+  - name: gate-in
+    transponderValidTime: 5500    # report the same tag at most every 5.5 s
+    persistenceResetTime: 200
+```
+
+Managed and unmanaged readers mix freely — anything without a `type` is left exactly as
+an operator configured it:
+
+```yaml
+readers:
+  - name: counter-1             # older generation, no login
+    type: OldGen
+    address: 192.168.1.102
+    port: 10001
+    listenerPort: 20002
+    mode: notification
+    antennas: [1]
+    rssiFilters: [55]
+    outputPowers: [0.5]
+
+  - name: staff-desk            # managed host mode reader; no notification settings
+    type: NewGen
+    address: 192.168.1.103
+    port: 10001
+    mode: host
+    username: admin
+    password: "CHANGE-ME"
+    antennas: [2]               # NewGen: 1 is external, 2 internal
+    rssiFilters: [60]
+    outputPowers: [1.0]
+    persistenceResetTime: 5     # so a tag answers again straight away
+
+  - name: hf-retrofit           # not managed; sync is uhf only
+    address: 192.168.1.105
+    port: 10001
+    protocol: hf
+    listenerPort: 20003
+    mode: notification
+```
+
+**What gets written.** For `gate-in` above, 18 parameters: the operating mode; RSSI
+filter (`0`, unless `rssiFilterMode: reader`) and output power per antenna; persistence
+reset mode and time per antenna; and, because it is in notification mode, the
+multiplexer, selected antennas, four data selectors, transponder valid time, and the notification channel's hold time, port and
+address. The same reader as `OldGen` is 15 — that generation has no persistence reset,
+and names two data selectors `AntennaNo` and `UID` rather than `Antenna` and `IDD`.
+
+The channel address is written only when `hostName` is set. Without it everything else
+still synchronises, and the reader's notification target address must be set by hand.
+
+Setting `readerConfigurationPersistent: false` does not make a change temporary. Neither
+tested reader has a RAM-only configuration bank: the MRU400 refuses the request, the
+MRU102 accepts it and keeps the value anyway, and in both cases the parameters survive a
+power cycle. Treat every write as permanent, and change one parameter at a time when
+finding the right `outputPowers` for a site.
+
+```bash
+# What does the service think of each reader?
+curl -s http://localhost:7070/readers | jq '.readers[] | {name, type, syncState, syncDetail}'
+
+# Compare against config.yaml and repair whatever drifted
+curl -X POST http://localhost:7070/readers/gate-in/sync
+
+# Rewrite every parameter, for a reader whose reported state you do not trust
+curl -X POST "http://localhost:7070/readers/gate-in/sync?force=true"
+```
+
+### Example Configuration
+
+```yaml
+# Global tag password configuration
+tagPasswords:
+  DE290Tag.access: "12345678"
+  DE290Tag.kill: "87654321"
+  DE6Tag.access: "AABBCCDD"
+  DE6Tag.kill: "EEFF0011"
+  DE386Tag.access: "11223344"
+  DE386Tag.kill: "55667788"
+  DE385Tag.access: "99AABBCC"
+  DE385Tag.kill: "DDEEFF00"
+  DELAN1Tag.access: "01020304"
+  DELAN1Tag.kill: "05060708"
+  BRTag.secret: "secret-key"
+
+# Default tag format for initialization
+defaultTagFormat: DE290
+
+# CSV file logging for successful /initialize calls
+tagFileLoggingEnabled: true
+tagFileLoggingPath: /logs/taggingLog.csv
+
+readers:
+  - name: "reader1"
+    address: "192.168.1.225"
+    port: 10001
+    mode: host
+    antennas: [4]
+  - name: "reader2"
+    address: "192.168.1.70"
+    port: 10001
+    protocol: "hf"
+    listenerPort: 20001
+    mode: notification
+```
+
+**Mode values:**
+- `host` - Polling mode for manual inventory scans. Needed for other modes of BookWaves
+- `notification` - Event-driven automatic tag detection. Needed for checkout and gate modes of BookWaves
+
+**Protocol values:**
+- `uhf` - EPC Gen2 flow (default when omitted)
+- `hf` - ISO15693 flow. The `antennas` field must be omitted for HF readers.
+
+**Important notes:**
+- Only configure passwords for tag formats you actually use
+- Replace placeholder passwords with your actual tag passwords
+- Reader `username` and `password` are stored in `config.yaml` in plain text. Keep the file readable only by the account running the service, and do not bake it into a container image — mount it at runtime.
+- Every notification-mode reader must have a unique `listenerPort`
+- When running in Docker, publish a listener port range that covers all configured listenerPort values (for example `-p 20001-20020:20001-20020`)
+- The service can confirm that it holds a listener port itself, but it cannot verify that a reader can *reach* that port. NAT, Docker port publishing and firewall rules between reader and host are the operator's responsibility; if notifications never arrive, check those first.
+- If `tagFileLoggingEnabled` is true, ensure `tagFileLoggingPath` is writable in the runtime (in Docker, mount that path to persist logs)
+
+### Configuring the RFID reader with ISOStart or web interface
+
+To make an RFID reader work in host mode or notification mode, you need to configure it properly using the ISOStart software or the reader's web interface (web interface only on MRU400). The exact steps depend on your reader model and firmware version, but generally include:
+
+#### Both modes
+1. Connect to the reader using ISOStart software or web interface (usually at `https://IP-OF-READER:8443/`)
+2. (Recommended) Configure "AirInterface -> UHF" to reduce the antenna power (loewest for a checkout terminal, higher for a gate)
+3. Leave "AirInterface -> UHF -> RSSIFilter" at `0`. Weakly read tags are filtered by this service instead: set `rssiFilters` in `config.yaml` (e.g. 40 for a checkout terminal, higher for a gate) — see [RSSI filtering](#rssi-filtering)
+
+NOTE: Both power and filter need to be tested and adjusted according to the physical setup, antenna gain, and desired read range. Too high power or too low filter values may cause unintended reads of tags outside the intended area.
+
+#### Host mode configuration
+
+Step 1 is synchronised for a `NewGen` or `OldGen` reader and step 2 for a `NewGen` one,
+so set those here only for a `GENERIC` reader.
+
+1. Set the operating mode "OperatingMode" to "Host mode"
+2. Reduce "Transponder -> PersistenceReset" for each antenna to e.g. `1 x 5ms`. This is needed to submit subsequent requets to an RFID tag quickly. In `config.yaml` this is `persistenceResetTime: 5`.
+   - NOTE: This setting is not exposed by the ISOStart software for older models (e.g. MRU102). For those you need to set them manually via TCP configuration calls according to the documentation (CFG16: Persistence Reset).
+
+#### Notification mode configuration
+1. Set the operating mode "OperatingMode" to "Notification mode"
+2. Make sure that the correct fields are transmitted by the NotificationMode:
+   - New readers: "OperatingMode -> AutoReadModes -> DataSelector" check "Antenna", "Date", "IDD" and "Time".
+   - Old readers: "OperatingMode -> NotificationMode -> DataSelector" check  "UID", "Time", "RSSI". "RSSI" transmits the antenna number together with the signal strength, so leave "AntennaNo" unchecked: the reader stores the antenna number one way or the other, not both.
+3. In the same menu, set "Filter -> TransponderValidTime" to a low value like `1 x 100ms`. This is the rate at which the reader detechs changes (e.g. signal strength of tag) for tags already in the field. Note: new tags are detected instantly, regardless of this setting.
+4. In "AirInterface -> Multiplexer", check "Enable", as well as the antennas you want to use. Here you could check multiple to make a gate or checkout terminal to use multiple antennas at the same time.
+5. Set the target for new notifications to your bookwaves-feig deployment:
+   - New readers: In "HostInterface -> LAN -> Remote -> Channel1", set the following values:
+     - ConnectionHoldTime: 10000
+     - PortNumber: The listener port you configured for this reader in the `config.yaml` (e.g. 20001)
+     - Address: The IP on which your BookWaves-Feig software runs
+   - Old readers: In "OptiontingMode -> NotificationMode -> Transmission -> Destination", set similarly named values: "ConnectionHoldTime", "PortNumber", and "IPAddress" with the same values as above
+   - Old HF readers (MR102): Set to transmit also "Data -> Data" and start at byte 0, transmit 16 bytes, LSB first. This transmits the media ID in notification mode without needing to read the tag first, which is required for HF tags since they transmit their unique ID in notifications by default.
+
+Note: Make sure IP:Port are reachable by the reader, since the reader pushes updates to that IP:Port combination.
+
+## API Endpoints
+
+Base URL: `http://localhost:7070`
+
+### Health Check
+
+#### Get Service Status
+```http
+GET /
+```
+Returns "Hello Feig!" to verify service is running.
+
+#### Test Endpoint
+```http
+GET /test
+```
+Returns "Test successful" for connectivity testing.
+
+### Reader Management
+
+#### List Readers
+```http
+GET /readers
+```
+
+Returns all configured readers with their status and configuration.
+
+**Response:**
+```json
+{
+  "success": true,
+  "readerCount": 2,
+  "readers": [
+    {
+      "name": "reader1",
+      "address": "192.168.1.225",
+      "port": 10001,
+      "listenerPort": 20001,
+      "mode": "notification",
+      "antennas": [1, 2, 3, 4],
+      "antennaMask": "0x0F",
+      "isConnected": true,
+      "connectionStatus": "connected",
+      "notificationActive": false,
+      "type": "NewGen",
+      "syncState": "IN_SYNC",
+      "syncDetail": "configuration matches"
+    }
+  ]
+}
+```
+
+`syncState` is one of:
+
+| State | Meaning |
+| --- | --- |
+| `UNMANAGED` | `type` is `GENERIC`; this service does not manage the reader's configuration |
+| `NEVER_CHECKED` | the reader has not been reached yet |
+| `UNREACHABLE` | the reader could not be contacted |
+| `IN_SYNC` | the reader matches `config.yaml` |
+| `DRIFTED` | the reader differs from `config.yaml` and could not be repaired; see `syncDetail` |
+
+#### Synchronise a Reader
+```http
+POST /readers/{readerName}/sync
+POST /readers/{readerName}/sync?force=true
+```
+
+Compares the reader against `config.yaml` and rewrites the parameters that have drifted.
+With `force=true` every parameter is rewritten whether or not it differs.
+
+**Response:**
+```json
+{
+  "success": true,
+  "reader": "reader2",
+  "forced": false,
+  "inSync": false,
+  "drifted": [
+    "AirInterface.Antenna.UHF.No1.RSSIFilter (RSSI filter for antenna 1): expected 60, found 99"
+  ],
+  "written": ["AirInterface.Antenna.UHF.No1.RSSIFilter"],
+  "summary": "Reader reader2: wrote 1 parameter(s) - AirInterface.Antenna.UHF.No1.RSSIFilter"
+}
+```
+
+### Notification Mode (SSE)
+
+Use these endpoints for readers configured with `mode: notification`.
+
+#### Start Notification Session
+```http
+POST /notification/start/{readerName}
+```
+
+Starts the FEIG notification listener for the reader.
+
+#### Stop Notification Session
+```http
+POST /notification/stop/{readerName}
+```
+
+Stops the notification listener for the reader.
+
+#### Subscribe to Notification Events (SSE)
+```http
+GET /notification/stream/{readerName}
+```
+
+Server-Sent Events stream. Event names:
+- `connected` - Initial stream handshake
+- `tag` - New tag event (includes `idd`)
+- `identification` - Reader identification event
+- `error` - Stream-level errors
+
+Each `tag` event payload includes:
+- `readerName`
+- `timestamp`
+- `eventType`
+- `idd` (EPC/IDD hex)
+- `rssiValues`
+- `readerTimestamp`
+
+#### Poll Notification Events (Legacy)
+```http
+GET /notification/events/{readerName}
+```
+
+Returns and drains queued notification events as JSON.
+
+#### Notification Security Operations
+```http
+POST /notification/secure/{readerName}?epc={epc}
+POST /notification/unsecure/{readerName}?epc={epc}
+```
+
+Use the `idd` value from SSE `tag` events as the `epc` query value.
+
+
+### Tag Operations
+
+#### Inventory Scan
+```http
+GET /inventory/{readerName}
+```
+
+Performs a single inventory scan and returns all detected tags with their format-specific information.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Inventory successful",
+  "count": 2,
+  "tags": [
+    {
+      "tagType": "DE290Tag",
+      "epc": "3034257BF468D4800000162E",
+      "pc": "3400",
+      "mediaId": "5678",
+      "secured": true,
+      "rssiValues": [
+        {
+          "antenna": 1,
+          "rssi": -42
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### Initialize Tag
+```http
+POST /initialize/{readerName}?mediaId={mediaId}&format={format}&secured={secured}
+```
+
+Initialize a blank tag with specified format and media ID. Writes EPC, passwords, and locks memory.
+
+**Query Parameters:**
+- `mediaId` (required) - Media identifier (format depends on tag type)
+- `format` (optional) - Tag format: DE290, DE6, DE290F, DE386, DE385, or DELAN1 (defaults to configured defaultTagFormat)
+- `secured` (optional) - Security bit value: true or false (default: true)
+
+**BookWavesTag media ID encodings:**
+- `DE386` and `DELAN1` use ASCII media ID encoding (max 10 ASCII chars)
+- `DE385` uses left-starting URN Code40 media ID encoding (max 15 chars)
+- URN Code40 allowed characters: `A-Z`, `0-9`, space, `-`, `.`, `:`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Tag initialized successfully",
+  "epc": "3034257BF468D4800000162E",
+  "pc": "3400",
+  "mediaId": "5678",
+  "secured": true,
+  "format": "DE290",
+  "tagType": "DE290Tag"
+}
+```
+
+**Errors:**
+- `400` - Invalid mediaId format or unsupported tag format
+- `404` - Reader not found
+- `500` - Initialization failed (no tag in field, multiple tags, write error)
+
+#### Edit Tag
+```http
+POST /edit/{readerName}?epc={epc}&mediaId={newMediaId}
+```
+
+Update the media ID on an existing formatted tag. Automatically handles password changes and memory updates.
+
+**Query Parameters:**
+- `epc` (required) - Current EPC hex string of the tag
+- `mediaId` (required) - New media identifier
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Tag updated successfully",
+  "oldEpc": "3034257BF468D4800000162E",
+  "newEpc": "3034257BF468D480000019C8",
+  "mediaId": "6600",
+  "tagType": "DE290Tag"
+}
+```
+
+**Errors:**
+- `400` - Invalid EPC, unrecognized format, or invalid mediaId
+- `404` - Reader not found
+- `500` - Update failed (tag not found, write error)
+
+#### Clear Tag
+```http
+POST /clear/{readerName}?epc={epc}
+```
+
+Reset a tag to factory state: zeros passwords, restores TID as EPC, and unlocks memory.
+
+**Query Parameters:**
+- `epc` (required) - EPC hex string of tag to clear
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Tag cleared successfully - passwords zeroed and EPC restored to TID",
+  "oldEpc": "3034257BF468D4800000162E",
+  "newEpc": "E280689400005003F76A18ED",
+  "newPc": "3000",
+  "tid": "E280689400005003F76A18ED"
+}
+```
+
+#### Secure Tag
+```http
+POST /secure/{readerName}?epc={epc}
+```
+
+Set the security bit on a tag (marks tag as secured/locked in circulation).
+
+**Query Parameters:**
+- `epc` (required) - EPC hex string of tag to secure
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Tag secured successfully",
+  "epc": "3034257BF468D4800000162E",
+  "tagType": "DE290Tag",
+  "secured": true
+}
+```
+
+#### Unsecure Tag
+```http
+POST /unsecure/{readerName}?epc={epc}
+```
+
+Clear the security bit on a tag (marks tag as available for circulation).
+
+**Query Parameters:**
+- `epc` (required) - EPC hex string of tag to unsecure
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Tag unsecured successfully",
+  "epc": "3034257BF468D4800000162E",
+  "tagType": "DE290Tag",
+  "secured": false
+}
+```
+
+#### Analyze Tag
+```http
+GET /analyze/{readerName}?epc={epc}
+```
+
+Perform deep analysis of a tag's memory banks, passwords, and security configuration. Useful for debugging and verification.
+
+**Query Parameters:**
+- `epc` (required) - EPC hex string of tag to analyze
+
+**Response:**
+```json
+{
+  "success": true,
+  "epc": "3034257BF468D4800000162E",
+  "analysis": {
+    "tagType": "DE290Tag",
+    "mediaId": "5678",
+    "epcBank": {
+      "readSuccess": true,
+      "pcValue": "0x3400",
+      "epcLengthInWords": 8,
+      "epcLengthInBytes": 16,
+      "actual": "34003034257BF468D4800000162E",
+      "theoretical": "34003034257BF468D4800000162E",
+      "matches": true
+    },
+    "tidBank": {
+      "readSuccess": true,
+      "data": "E280689400005003F76A18ED",
+      "length": 12
+    },
+    "reservedBank": {
+      "readableWithoutAuth": false,
+      "readableWithAuth": true,
+      "theoretical": "162E5678162E5678",
+      "actual": "162E5678162E5678",
+      "matches": true,
+      "passwordsAreZero": false
+    },
+    "lockStatus": {
+      "reservedBank": "LOCKED",
+      "reservedBankStatus": "Read-protected with access password"
+    },
+    "securityAssessment": {
+      "properlySecured": true,
+      "passwordCorrect": true,
+      "issues": [],
+      "passwordProtectionConfigured": true,
+      "passwordProtectionRequired": true
+    }
+  }
+}
+```
+
+**Analysis Fields:**
+- `epcBank` - PC and EPC memory verification
+- `tidBank` - Tag Identifier data
+- `reservedBank` - Password memory and authentication status
+- `lockStatus` - Lock configuration for each memory bank
+- `securityAssessment` - Overall security evaluation and detected issues
+
+## Supported Tag Types
+
+- **DE290Tag** - TU Dortmund university library standard (uses numerical barcodes)
+- **DE290FTag** - TU Dortmund university library Fernleihe variant
+- **BRTag** - TU Dortmund university library legacy tags by Smartfreq
+- **DE385Tag** - Trier university library (uses URN Code40 barcodes)
+- **DE386Tag** - RPTU Kaiserslautern university library (uses ASCII barcodes)
+- **DELAN1Tag** - RPTU Landau university library (uses ASCII barcodes)
+- **DE6Tag** - ULB Münster library standard (uses numerical barcodes)
+- **RawTag** - Fallback for unrecognized formats
+
+All tag types support automatic password lookup from configuration.
+
+## Architecture
+
+- **ReaderManager** - Central registry for all readers
+- **ManagedReader** - Wraps ReaderModule with mode-specific operations
+- **TagFactory** - Auto-detects and creates appropriate Tag instances
+- **ConfigLoader** - YAML configuration parser
+
+## Security Notes
+
+- Configuration file contains sensitive passwords
+- Use volume mounts with `:ro` (read-only) flag in production
+- Passwords are validated on startup - warnings logged for placeholder values
+- Never commit `config.yaml` to version control
+
+## Requirements
+
+- Java 21 or newer (64-bit platforms only)
+- Feig RFID readers (TCP/IP network interface)
+- OpenSSL 3.2+ on Linux for TLS features
+- Native libraries in `LD_LIBRARY_PATH`
+
+## Troubleshooting
+
+### Native Library Issues
+Ensure `LD_LIBRARY_PATH` points to correct native libraries:
+- Linux: `native/linux.x64`
+- Check logs for "java.library.path" on startup
+
+### Connection Failures
+- Verify reader IP address and port in config
+- Check network connectivity to readers
+- Ensure readers are powered on and network-accessible
+
+### Tag Not Detected
+- Verify antenna numbers match physical configuration
+- Check RF field is enabled
+- Ensure tag is within read range
+- Ensure passwords in config.yaml match tag programming
+
+---
+
+## Development
+
+The following sections are for developers who want to build, modify, or contribute to the project.
+
+### Requirements
+
+- Java 21 or newer
+- Maven
+- Feig SDK files (see Devcontainer Prerequisites below)
+
+### FEIG SDK Setup
+
+Before running the application, you must obtain the Feig SDK files.
+
+1. **Download the Feig SDK** from the official Feig Electronic website:
+   - Navigate to the SDK download section for Java
+   - Download the latest Java SDK package (64-bit Linux version required)
+   - Note: Current version used is: `FEIG.ID.SDK.Gen3.Java-v7.1.0`
+
+2. **Extract required files** to the project directories:
+
+   **JAR files** (`libs/` directory):
+   ```
+   libs/fedm-funit-java-api-1.1.0.jar
+   libs/fedm-java-api-7.1.0.jar
+   libs/fedm-service-java-api-11.2.1.jar
+   ```
+
+   **Native libraries** (`native/linux.x64/` directory):
+   ```
+   native/linux.x64/install.sh
+   native/linux.x64/libfecom.so.5.1.0
+   native/linux.x64/libfedm-funit.so.1.1.0
+   native/linux.x64/libfedm-funit4j.so.1.1.0
+   native/linux.x64/libfedm-service.so.11.2.1
+   native/linux.x64/libfedm-service4j.so.11.2.1
+   native/linux.x64/libfedm.so.7.1.0
+   native/linux.x64/libfedm4j.so.7.1.0
+   native/linux.x64/libfeisp.so.1.5.1
+   native/linux.x64/libfetls.so.0.9.0
+   native/linux.x64/libfeudp.so.1.0.0
+   native/linux.x64/libfeusb2.so.1.1.0
+   ```
+
+3. **Create symbolic links** by running the provided install script:
+
+   ```bash
+   cd native/linux.x64
+   chmod +x install.sh
+   ./install.sh
+   ```
+
+   This creates the required `.so` and `.so.X` symbolic links pointing to the versioned files.
+
+4. **Verify directory structure** after running install.sh:
+
+   ```
+   .
+   ├── libs/
+   │   ├── fedm-funit-java-api-1.1.0.jar
+   │   ├── fedm-java-api-7.1.0.jar
+   │   └── fedm-service-java-api-11.2.1.jar
+   ├── native/
+   │   └── linux.x64/
+   │       ├── install.sh
+   │       ├── libfecom.so -> libfecom.so.5
+   │       ├── libfecom.so.5 -> libfecom.so.5.1.0
+   │       ├── libfecom.so.5.1.0
+   │       ├── libfedm.so -> libfedm.so.7
+   │       ├── libfedm.so.7 -> libfedm.so.7.1.0
+   │       ├── libfedm.so.7.1.0
+   │       └── (etc. - all libraries with symlinks)
+   └── ...
+   ```
+
+**Note:** These files are proprietary and cannot be included in the repository. You must obtain them directly from Feig Electronic.
+
+### Configuration
+
+Create your local configuration:
+
+```bash
+cp config.example.yaml config.yaml
+# Edit config.yaml with your reader settings
+```
+
+### Running the Application
+
+Use the provided helper script:
+
+```bash
+./run.sh
+```
+
+The script automatically:
+
+- Compiles the project
+- Copies Maven runtime dependencies into `target/dependency`
+- Sets the required runtime environment variables
+- Starts `de.bookwaves.Main`
+
+### Manual Execution (Optional)
+
+For debugging or custom workflows, you can also run the application manually:
+
+```bash
+mvn compile dependency:copy-dependencies
+
+export CONFIG_FILE_PATH=$(pwd)/config.yaml
+export LD_LIBRARY_PATH=$(pwd)/native/linux.x64
+
+java -cp "target/classes:target/dependency/*:libs/*" de.bookwaves.Main
+```
+
+You can also use the provided VS Code launch configuration.
+
+### Running the tests
+
+```bash
+mvn test                # unit tests; no reader needed
+mvn test -Phardware     # against the readers in config.hardware.yaml
+```
+
+`config.hardware.yaml` is gitignored and has the same shape as `config.yaml`. Copy
+`config.example.yaml` to it and point it at the readers to test. Without that file, or
+when a reader does not answer, or when the SDK's native library is missing, the
+hardware tests are skipped with a reason rather than failed — so `-Phardware` is safe to
+run anywhere.
+
+The hardware run **writes to the readers**. It brings each one into agreement with
+`config.hardware.yaml`, then mutates one RSSI filter to prove drift is detected and only
+that parameter is repaired. Every write is permanent — no tested reader has a RAM-only
+configuration bank — so a run that crashes midway leaves the reader changed. The
+mutation prints the value it displaces before writing it, so it can be put back by hand
+from the output. Point `config.hardware.yaml` at test readers, not at a live gate.
+
+### Developing with Devcontainer
+
+The devcontainer provides a preconfigured Java and Maven development environment.
+
+#### Usage
+
+1. **Open in VS Code** with the Dev Containers extension installed
+
+2. **Reopen in Container** - VS Code will prompt to reopen in the devcontainer, or use:
+   - Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
+   - Select: "Dev Containers: Reopen in Container"
+
+3. **Ensure the FEIG SDK files are available** as described in the FEIG SDK Setup section above.
+
+4. **Create your configuration** if you have not already:
+
+   ```bash
+   cp config.example.yaml config.yaml
+   # Edit config.yaml with your reader settings
+   ```
+
+5. **Run the application**:
+
+   ```bash
+   ./run.sh
+   ```
+
+   You can also use the provided VS Code launch configuration.
+
+### Building the Docker Image
+
+#### Prerequisites
+
+The same SDK files are required for Docker builds:
+
+1. **Ensure SDK files are in place** as described in the Devcontainer Prerequisites section above
+   - `libs/` - JAR files
+   - `native/linux.x64/` - Native library files with symlinks
+
+2. **Install Docker** with buildx support (included in Docker Desktop)
+
+3. **Authenticate with GitHub Container Registry** (for pushing images):
+   ```bash
+   echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+   ```
+   
+   Or create a Personal Access Token (PAT) with `write:packages` scope.
+
+#### Build for Local Testing
+
+```bash
+docker buildx build --platform linux/amd64 --tag ghcr.io/lukaslerche/bookwaves-feig:latest --load .
+```
+
+**Note:** The `--platform linux/amd64` flag is required because the native libraries are platform-specific. The `--load` flag imports the image into your local Docker daemon for testing.
+
+#### Push to GitHub Container Registry
+
+1. **Build and push** with version tags:
+   ```bash
+   docker buildx build --platform linux/amd64 \
+     --tag ghcr.io/lukaslerche/bookwaves-feig:latest \
+     --tag ghcr.io/lukaslerche/bookwaves-feig:1.7.1 \
+     --push .
+   ```
+
+2. **Verify the push** by checking the GitHub Container Registry:
+   - Navigate to your GitHub profile → Packages
+   - Find `bookwaves-feig` package
+
+3. **Make the package public** (optional):
+   - Go to package settings
+   - Change visibility to public
+
+**Note:** Currently only `linux/amd64` is supported because the native libraries are x64-specific. Additional platforms would require corresponding native libraries from Feig.
+
+### Environment Variables
+
+- `CONFIG_FILE_PATH` - Path to configuration file (optional in Docker, defaults to `/app/config/config.yaml`)
+- `LD_LIBRARY_PATH` - Path to native libraries (set automatically in Dockerfile)

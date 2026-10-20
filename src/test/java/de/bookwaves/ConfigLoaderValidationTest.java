@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -288,6 +289,57 @@ class ConfigLoaderValidationTest {
         config.setAntennas(List.of(1));
 
         assertTrue(messageOf(config).contains("hf"), messageOf(config));
+    }
+
+    @Test
+    @DisplayName("configuration sync is refused for an hf reader given a uhf type")
+    void hfReaderCannotBeManaged() {
+        ReaderConfig config = new ReaderConfig();
+        config.setName("reader3");
+        config.setMode("host");
+        config.setProtocol("hf");
+        config.setType("NewGen");
+
+        assertTrue(messageOf(config).contains("only available for uhf"), messageOf(config));
+    }
+
+    @Test
+    @DisplayName("a listenerPort outside the TCP port range is rejected at load")
+    void listenerPortRangeIsChecked() {
+        ReaderConfig tooHigh = managedReader();
+        tooHigh.setListenerPort(70000);
+        ReaderConfig zero = managedReader();
+        zero.setListenerPort(0);
+
+        assertTrue(messageOf(tooHigh).contains("listenerPort 70000"), messageOf(tooHigh));
+        assertTrue(messageOf(zero).contains("listenerPort 0"), messageOf(zero));
+    }
+
+    @Test
+    @DisplayName("the highest TCP port is a valid listenerPort")
+    void highestListenerPortIsAccepted() {
+        ReaderConfig config = managedReader();
+        config.setListenerPort(65535);
+
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(config)));
+    }
+
+    @Test
+    @DisplayName("the example config's credential placeholder is recognised, real values are not")
+    void placeholderCredentialsAreRecognised() {
+        assertTrue(ConfigLoader.isPlaceholderCredential("SET_IN_SERVER"));
+        assertFalse(ConfigLoader.isPlaceholderCredential("s3cret"));
+        assertFalse(ConfigLoader.isPlaceholderCredential(null));
+    }
+
+    @Test
+    @DisplayName("placeholder credentials warn but still load")
+    void placeholderCredentialsStillLoad() {
+        ReaderConfig config = managedReader();
+        config.setUsername("SET_IN_SERVER");
+        config.setPassword("SET_IN_SERVER");
+
+        assertDoesNotThrow(() -> ConfigLoader.validateReaderConfigurations(List.of(config)));
     }
 
     @Test

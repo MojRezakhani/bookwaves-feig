@@ -1014,16 +1014,11 @@ public class Main {
 
                 config.routes.post("/edit/{readerName}", ctx -> {
                     String readerName = ctx.pathParam("readerName");
-                    String epcHex = ctx.queryParam("epc");
-                    String newMediaId = ctx.queryParam("mediaId");
-                    
-                    if (epcHex == null || epcHex.isEmpty()) {
-                        ctx.status(400).json(Map.of(
-                            "success", false,
-                            "error", "Missing 'epc' query parameter"
-                        ));
+                    String epcHex = requireTagId(ctx);
+                    if (epcHex == null) {
                         return;
                     }
+                    String newMediaId = ctx.queryParam("mediaId");
 
                     if (newMediaId == null || newMediaId.isEmpty()) {
                         ctx.status(400).json(Map.of(
@@ -1103,13 +1098,8 @@ public class Main {
 
                 config.routes.post("/clear/{readerName}", ctx -> {
                     String readerName = ctx.pathParam("readerName");
-                    String epcHex = ctx.queryParam("epc");
-                    
-                    if (epcHex == null || epcHex.isEmpty()) {
-                        ctx.status(400).json(Map.of(
-                            "success", false,
-                            "error", "Missing 'epc' query parameter"
-                        ));
+                    String epcHex = requireTagId(ctx);
+                    if (epcHex == null) {
                         return;
                     }
 
@@ -1166,13 +1156,8 @@ public class Main {
 
                 config.routes.get("/analyze/{readerName}", ctx -> {
                     String readerName = ctx.pathParam("readerName");
-                    String epcHex = ctx.queryParam("epc");
-                    
-                    if (epcHex == null || epcHex.isEmpty()) {
-                        ctx.status(400).json(Map.of(
-                            "success", false,
-                            "error", "Missing 'epc' query parameter"
-                        ));
+                    String epcHex = requireTagId(ctx);
+                    if (epcHex == null) {
                         return;
                     }
 
@@ -1245,13 +1230,8 @@ public class Main {
      */
     private static void handleSecurityOperationWithReconnect(io.javalin.http.Context ctx, ReaderManager readerManager, boolean secure) {
         String readerName = ctx.pathParam("readerName");
-        String epcHex = ctx.queryParam("epc");
-        
-        if (epcHex == null || epcHex.isEmpty()) {
-            ctx.status(400).json(Map.of(
-                "success", false,
-                "error", "Missing 'epc' query parameter"
-            ));
+        String epcHex = requireTagId(ctx);
+        if (epcHex == null) {
             return;
         }
 
@@ -1323,13 +1303,8 @@ public class Main {
 
     private static void handleNotificationSecurityOperation(io.javalin.http.Context ctx, ReaderManager readerManager, boolean secure) {
         String readerName = ctx.pathParam("readerName");
-        String epcHex = ctx.queryParam("epc");
-
-        if (epcHex == null || epcHex.isEmpty()) {
-            ctx.status(400).json(Map.of(
-                "success", false,
-                "error", "Missing 'epc' query parameter"
-            ));
+        String epcHex = requireTagId(ctx);
+        if (epcHex == null) {
             return;
         }
 
@@ -1431,6 +1406,43 @@ public class Main {
                 "error", e.getMessage()
             ));
         }
+    }
+
+    /**
+     * Resolves the tag identifier for a request from either the protocol-neutral `tagId`
+     * query parameter or the legacy `epc` query parameter. `epc` is EPC Gen2 (UHF)
+     * terminology and does not describe the identifier on HF/ISO 15693 tags; `tagId` is
+     * the vendor- and protocol-neutral name the middleware protocol specification settled
+     * on. Both are accepted so existing callers keep working (expand before contract): when
+     * a request carries both and they differ, `tagId` takes precedence, since it is the
+     * form callers are expected to send going forward.
+     */
+    private static String resolveTagId(io.javalin.http.Context ctx) {
+        return resolveTagId(ctx.queryParam("tagId"), ctx.queryParam("epc"));
+    }
+
+    static String resolveTagId(String tagId, String epc) {
+        if (tagId != null && !tagId.isEmpty()) {
+            return tagId;
+        }
+        return epc;
+    }
+
+    /**
+     * {@link #resolveTagId}, answering 400 when the request names no tag.
+     *
+     * @return the tag identifier, or null when the 400 response has already been sent
+     */
+    private static String requireTagId(io.javalin.http.Context ctx) {
+        String tagId = resolveTagId(ctx);
+        if (tagId == null || tagId.isEmpty()) {
+            ctx.status(400).json(Map.of(
+                "success", false,
+                "error", "Missing 'tagId' (or legacy 'epc') query parameter"
+            ));
+            return null;
+        }
+        return tagId;
     }
 
     private static boolean isNotificationReader(ReaderConfig config) {
@@ -1570,7 +1582,11 @@ public class Main {
         payload.put("readerName", readerName);
         payload.put("timestamp", event.timestamp);
         payload.put("eventType", event.eventType);
+        // "tagId" is the protocol-neutral name (see the middleware protocol specification's
+        // protocol-agnostic tag identifier); "epc" is kept alongside it so existing stream
+        // consumers keep working (expand before contract) — both carry the identical value.
         payload.put("epc", event.epc);
+        payload.put("tagId", event.epc);
         payload.put("tagType", event.tagType);
         payload.put("mediaId", event.mediaId);
         payload.put("secured", event.secured);

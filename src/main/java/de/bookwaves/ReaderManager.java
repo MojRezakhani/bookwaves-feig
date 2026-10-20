@@ -147,7 +147,12 @@ public class ReaderManager {
         private Connector createConnector() {
             Connector connector = Connector.createTcpConnector(config.getAddress(), config.getPort());
             connector.setTcpConnectTimeout(5000);
-            if (config.hasCredentials()) {
+            // A generation without user login ignores the credentials, as ConfigLoader warns.
+            // An unmanaged reader keeps them: GENERIC says nothing about its hardware.
+            boolean supportsLogin = config.getProfile()
+                .map(ReaderProfile::supportsAuthentication)
+                .orElse(true);
+            if (config.hasCredentials() && supportsLogin) {
                 connector.setAuthentication(config.getUsername(), config.getPassword());
                 log.debug("Using authenticated connection for reader {}", config.getName());
             }
@@ -257,8 +262,11 @@ public class ReaderManager {
                     : "repaired " + report.written().size() + " parameter(s)";
                 log.info("{}", report.summary());
                 return report;
-            } catch (ReaderOperationException e) {
-                syncState = SyncState.DRIFTED;
+            } catch (Exception e) {
+                // Distinguish a dropped connection from configuration drift. Runtime
+                // failures must also replace any earlier IN_SYNC state. getModule keeps
+                // managed operations blocked until synchronisation succeeds.
+                syncState = isConnectionError(e.getMessage()) ? SyncState.UNREACHABLE : SyncState.DRIFTED;
                 syncDetail = e.getMessage();
                 throw e;
             }

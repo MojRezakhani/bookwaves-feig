@@ -75,22 +75,24 @@ class HardwareSyncTest {
     @MethodSource("readers")
     @DisplayName("drift is detected, only the drifted parameter is written, and it is restored")
     void detectsAndRepairsOnlyWhatDrifted(ReaderConfig config) throws Exception {
+        String parameter = String.format(MUTABLE_PARAMETER, config.getAntennas().get(0));
+        ParamValue desired = desiredValueOf(config, parameter);
         ReaderModule module = HardwareReaders.connect(config);
+        ReaderConfigPort port = new FeigReaderConfigPort(module, config.getName());
+        boolean mutated = false;
         try {
             ConfigurationSync sync = syncFor(config);
-            ReaderConfigPort port = new FeigReaderConfigPort(module, config.getName());
 
             Assumptions.assumeTrue(sync.check(port, config).inSync(),
                 "reader " + config.getName() + " does not match its configuration yet");
 
-            String parameter = String.format(MUTABLE_PARAMETER, config.getAntennas().get(0));
-            ParamValue desired = desiredValueOf(config, parameter);
-            ParamValue mutated = nudge(desired);
+            ParamValue nudged = nudge(desired);
 
             System.out.println("Mutating " + parameter + " from " + desired.describe()
-                + " to " + mutated.describe() + "; write it back by hand if this run stops here");
+                + " to " + nudged.describe() + "; write it back by hand if this run stops here");
 
-            port.set(parameter, mutated);
+            mutated = true;
+            port.set(parameter, nudged);
             port.apply(true);
 
             SyncReport drifted = sync.check(port, config);
@@ -105,7 +107,29 @@ class HardwareSyncTest {
             assertEquals(desired, port.get(parameter, desired.type()));
             assertTrue(sync.check(port, config).inSync());
         } finally {
+            if (mutated) {
+                restore(port, parameter, desired);
+            }
             HardwareReaders.close(module);
+        }
+    }
+
+    /**
+     * Writes {@code desired} back if a failed assertion left the reader mutated. Best
+     * effort: a failure here is printed rather than thrown, so it cannot hide the
+     * assertion that got us here.
+     */
+    private static void restore(ReaderConfigPort port, String parameter, ParamValue desired) {
+        try {
+            port.readCompleteConfiguration();
+            if (!desired.equals(port.get(parameter, desired.type()))) {
+                port.set(parameter, desired);
+                port.apply(true);
+                System.out.println("Restored " + parameter + " to " + desired.describe());
+            }
+        } catch (Exception e) {
+            System.out.println("Could not restore " + parameter + " to " + desired.describe()
+                + "; write it back by hand: " + e.getMessage());
         }
     }
 

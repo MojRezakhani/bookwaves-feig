@@ -5,6 +5,7 @@ import de.bookwaves.sync.ReaderMode;
 import de.bookwaves.sync.ReaderProfile;
 import de.bookwaves.sync.RssiFilterMode;
 import de.bookwaves.sync.TagTiming;
+import de.bookwaves.sync.UhfProfile;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -178,10 +179,36 @@ public class ConfigLoader {
 
         List<ReaderConfig> readers = configuration.getReaders();
         validateReaderConfigurations(readers);
+        warnOnUnwritableHostName(readers, getHostName());
 
         log().info("Loaded configuration with {} readers and {} tag password entries",
             readers.size(), configuration.getTagPasswords().size());
         return readers;
+    }
+
+    /**
+     * Names every managed notification reader that will not get {@code hostName} as its
+     * notification target. An older generation stores the address as four packed bytes and
+     * cannot hold a host name, so the address is left out of its sync rather than written
+     * wrongly — which is right, but silent unless reported here.
+     */
+    static void warnOnUnwritableHostName(List<ReaderConfig> readers, String hostName) {
+        if (hostName == null) {
+            return;
+        }
+        for (ReaderConfig reader : readers) {
+            if (!ReaderMode.NOTIFICATION.matches(reader.getMode())) {
+                continue;
+            }
+            reader.getProfile()
+                .filter(UhfProfile.class::isInstance)
+                .map(UhfProfile.class::cast)
+                .filter(profile -> profile.notificationTarget().address().of(hostName).isEmpty())
+                .ifPresent(profile -> log().warn(
+                    "Reader {} is type {}, which stores its notification target as an IPv4 address; "
+                        + "hostName '{}' is not one, so the target address must be set on the reader by hand",
+                    reader.getName(), profile.id(), hostName));
+        }
     }
 
     /**
@@ -237,6 +264,17 @@ public class ConfigLoader {
         if (mode == ReaderMode.NOTIFICATION && reader.getListenerPort() == null) {
             throw new Exception("Invalid reader configuration for '" + name
                 + "': listenerPort is required in notification mode");
+        }
+
+        Integer listenerPort = reader.getListenerPort();
+        if (listenerPort != null && (listenerPort < 1 || listenerPort > 65535)) {
+            throw new Exception("Invalid reader configuration for '" + name
+                + "': listenerPort " + listenerPort + " is out of range 1..65535");
+        }
+
+        if (isPlaceholderCredential(reader.getUsername()) || isPlaceholderCredential(reader.getPassword())) {
+            log().warn("Reader {} still has the example's placeholder username or password; "
+                + "logging in to the reader will fail until the real credentials are set", name);
         }
 
         if (reader.isHfProtocol() && !reader.getAntennas().isEmpty()) {
@@ -310,6 +348,11 @@ public class ConfigLoader {
             log().warn("Reader {} is type {}, which has no user login; "
                 + "the configured username and password are ignored", name, profile.id());
         }
+    }
+
+    /** Whether a reader credential is still the placeholder the example config ships. */
+    static boolean isPlaceholderCredential(String value) {
+        return "SET_IN_SERVER".equals(value);
     }
 
     private static void requireStorable(String name, TagTiming timing, String value) throws Exception {

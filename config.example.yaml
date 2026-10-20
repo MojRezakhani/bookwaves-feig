@@ -1,11 +1,12 @@
 # Example RFID Reader Configuration
 # Copy this file to 'config.yaml' and customize for your setup
 
-# Address readers dial back to in notification mode.
-# This service writes it to each synchronised notification reader, so the reader
-# knows where to send tag reads. If it is left unset, the reader's notification
-# target address has to be set on the reader by hand.
-hostName: "HOST"
+# Address readers dial back to in notification mode: this host, as the readers can
+# reach it. This service writes it to each synchronised notification reader, so the
+# reader knows where to send tag reads. If it is left unset, the reader's
+# notification target address has to be set on the reader by hand. OldGen readers
+# store it as an IPv4 address, so use one rather than a host name for them.
+# hostName: "192.168.1.10"
 
 # Global tag password configuration
 # IMPORTANT: Configure these passwords before production use!
@@ -20,10 +21,17 @@ tagPasswords:
   DE385Tag.kill: "CHANGE-ME"
   DELAN1Tag.access: "CHANGE-ME"
   DELAN1Tag.kill: "CHANGE-ME"
+  # BRTag uses a single secret (access password is derived via SHA-1 over EPC + secret),
+  # not a separate access/kill pair like the other formats
+  BRTag.secret: "CHANGE-ME"
 
 # Default tag format for initialization
-# Supported: DE290, CD290, DE6, DE290F, DE386, DE385, DELAN1
-# Note: C40 variants use the same password keys as their base format (e.g., DE386Tag.access / DE386Tag.kill)
+# Supported: DE290, CD290, DE386, DE385, DELAN1
+# Note: CD290 shares DE290Tag's password keys (DE290Tag.access / DE290Tag.kill)
+# DE6 and DE290F are deliberately omitted here: neither ever went into production, even though the
+# code still accepts them as of this writing (Main.createTagForInitialization still has cases for
+# both). Removing them from the code is a separate change; until that lands,
+# this list will legitimately be shorter than what the code accepts.
 defaultTagFormat: DE290
 
 # Application log level (trace, debug, info, warn, error)
@@ -45,9 +53,10 @@ tagFileLoggingEnabled: true
 # Path inside the runtime/container filesystem
 tagFileLoggingPath: /logs/taggingLog.csv
 
-# If true, configuration written to a reader is stored in its EEPROM and survives a
-# power cycle. If false, the reader reverts to its stored configuration on restart
-# and this service reconfigures it on the next connection.
+# Asks a synchronised reader to store written configuration in its EEPROM.
+# Leave this at true: no tested reader has a RAM-only configuration bank. With
+# false the MRU400 refuses the request and the MRU102 stores it permanently anyway,
+# so every configuration sync is a permanent change to the reader.
 # Default: true
 readerConfigurationPersistent: true
 
