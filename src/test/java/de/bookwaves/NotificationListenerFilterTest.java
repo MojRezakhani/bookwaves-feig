@@ -66,6 +66,21 @@ class NotificationListenerFilterTest {
     }
 
     @Test
+    void mru102NearFarNearReadingsRespectFilterAndWriteEligibility() {
+        NotificationListener listener = listener();
+        try {
+            for (int raw : new int[]{28, 30, 37, 40, 55, 51, 42, 39, 30, 28}) {
+                boolean expectedKeep = raw <= 40;
+                assertEquals(expectedKeep, listener.filterObservation("epc", null,
+                    List.of(new AntennaRssi(1, raw))).isPresent(), "raw RSSI " + raw);
+                assertEquals(expectedKeep, listener.getWriteTargetByEpc("epc") != null);
+            }
+        } finally {
+            listener.close();
+        }
+    }
+
+    @Test
     void closeClearsWriteEligibility() {
         NotificationListener listener = listener();
         try {

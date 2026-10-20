@@ -71,21 +71,13 @@ public class Main {
         }
 
         String configuredLogLevel = ConfigLoader.getLogLevel();
-        if (configuredLogLevel != null && !configuredLogLevel.isBlank()) {
-            System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", configuredLogLevel.toLowerCase());
-        }
-
         Map<String, String> configuredLoggerLevels = ConfigLoader.getLoggerLevels();
-        for (Map.Entry<String, String> entry : configuredLoggerLevels.entrySet()) {
-            String loggerName = entry.getKey();
-            String loggerLevel = entry.getValue();
-            if (loggerName == null || loggerName.isBlank() || loggerLevel == null || loggerLevel.isBlank()) {
-                continue;
-            }
-            System.setProperty(
-                "org.slf4j.simpleLogger.log." + loggerName,
-                loggerLevel.toLowerCase()
-            );
+        try {
+            LoggingConfiguration.apply(configuredLogLevel, configuredLoggerLevels);
+        } catch (IllegalArgumentException e) {
+            System.err.println("Failed to configure logging: " + e.getMessage());
+            System.exit(1);
+            return;
         }
 
         boolean corsAnyHost = ConfigLoader.isCorsAnyHost();
@@ -93,11 +85,8 @@ public class Main {
         tagFileLoggingPath = Path.of(ConfigLoader.getTagFileLoggingPath());
 
         log = LoggerFactory.getLogger(Main.class);
-        String effectiveLogLevel = System.getProperty("org.slf4j.simpleLogger.defaultLogLevel", "info");
-        log.info("Log level initialized (configured={}, effective={}, loggerOverrides={})",
-            configuredLogLevel == null || configuredLogLevel.isBlank() ? "INFO" : configuredLogLevel,
-            effectiveLogLevel.toUpperCase(),
-            configuredLoggerLevels.size());
+        log.info("Logback levels initialized (root={}, loggerOverrides={})",
+            configuredLogLevel, configuredLoggerLevels.size());
         log.info("Tag file logging initialized (enabled={}, path={})", tagFileLoggingEnabled, tagFileLoggingPath);
 
         try {
@@ -1366,16 +1355,18 @@ public class Main {
 
                 TagItem tagItem = writeTarget.tagItem();
                 int writeAntenna = writeTarget.antenna();
-                int resumeAntenna = firstConfiguredAntenna(managedReader.getConfig());
+                int resumeAntenna = writeAntenna > 0
+                    ? writeAntenna
+                    : firstConfiguredAntenna(managedReader.getConfig());
                 log.debug("Notification security op for {}: pause RF (epc={} secure={} writeAntenna={} resumeAntenna={})",
                     readerName, normalizedEpc, secure, writeAntenna, resumeAntenna);
 
-                pauseNotifications(reader, readerName, writeAntenna);
+                pauseNotifications(reader, readerName);
 
                 try {
                     modifySecurityBitWithoutInventory(reader, normalizedEpc, tag, tagItem);
                 } finally {
-                    int rfOnRc = reader.rf().on(resumeAntenna, false, false); // maintainHostMode = false, dcOn = false
+                    int rfOnRc = reader.rf().on(resumeAntenna, false, false); // resume auto-read on the tag's antenna
                     if (rfOnRc != ErrorCode.Ok) {
                         log.error("Failed to resume notification mode for {} after security update (RF on rc={} status={})",
                             readerName, rfOnRc, reader.lastErrorStatusText());
@@ -1533,24 +1524,18 @@ public class Main {
     }
 
     /**
-     * Stops the reader auto reading, on the antenna that last saw the tag when the
-     * notification named one.
-     *
-     * <p>Holding host mode keeps the multiplexer from rotating away mid write. Without an
-     * antenna the field stays wherever the multiplexer stopped.
+     * Stops automatic notification reads before issuing a host command to the tag.
+     * RF OFF has no antenna selector; after the write, the reader is resumed on the
+     * antenna that reported the tag (or the configured fallback antenna).
      */
-    private static void pauseNotifications(ReaderModule reader, String readerName, int writeAntenna)
-            throws Exception {
-        int returnCode = writeAntenna > 0
-            ? reader.rf().on(writeAntenna, true, false) // maintainHostMode = true, dcOn = false
-            : reader.rf().off();
+    private static void pauseNotifications(ReaderModule reader, String readerName) throws Exception {
+        int returnCode = reader.rf().off();
 
         if (returnCode != ErrorCode.Ok) {
             throw new Exception("Failed to pause notification mode: " + reader.lastErrorStatusText() +
                 " (code: " + returnCode + ")");
         }
-        log.debug("Notifications paused for {} (antenna {})", readerName,
-            writeAntenna > 0 ? String.valueOf(writeAntenna) : "as left by the multiplexer");
+        log.debug("Notifications paused for {} (RF off)", readerName);
     }
 
     private static int firstConfiguredAntenna(ReaderConfig config) {

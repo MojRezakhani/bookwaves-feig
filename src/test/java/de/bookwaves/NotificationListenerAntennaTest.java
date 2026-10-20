@@ -35,6 +35,15 @@ class NotificationListenerAntennaTest {
     }
 
     @Test
+    void positiveMagnitudesChooseSmallestAndPreserveRawBestRssi() {
+        var readings = List.of(seen(2, 57), seen(1, 30), seen(4, 42));
+        assertEquals(1, NotificationListener.strongestAntenna(readings));
+        assertEquals(30, NotificationListener.bestRssi(readings));
+        assertEquals(-30, NotificationListener.bestRssi(List.of(seen(1, -30), seen(2, -57))));
+        assertEquals(1, NotificationListener.strongestAntenna(List.of(seen(2, 57), seen(1, -30))));
+    }
+
+    @Test
     @DisplayName("no antenna reported means no antenna to write on")
     void nothingReported() {
         assertEquals(0, NotificationListener.strongestAntenna(List.of()));

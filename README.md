@@ -25,7 +25,6 @@ to build and run this repository. Relevant starting points:
 
 Local documentation covers features added after the documentation-site migration:
 
-- [Tag formats, including ISO/TS 28560-4 identity and user memory](docs/tags.md)
 - [Software-defined RSSI filtering](docs/adr/0002-filter-signal-strength-in-this-service.md)
   (`rssiFilterMode: software` is the default; managed readers must synchronise successfully
   before use, including after reconnecting)

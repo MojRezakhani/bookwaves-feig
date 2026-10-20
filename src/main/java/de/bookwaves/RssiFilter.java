@@ -18,7 +18,8 @@ import org.slf4j.LoggerFactory;
  * tag's readings after the reader has reported them. See ADR 0002.
  *
  * <p>Filters are configured in -dBm, as the reader's own filter is, while readings are
- * signed dBm. A filter of 60 keeps readings of -60 dBm and stronger; 0 keeps everything.
+ * either signed dBm or positive -dBm magnitudes (observed on MRU102 notifications).
+ * A filter of 60 keeps readings of -60 or +60 and stronger; 0 keeps everything.
  */
 public final class RssiFilter {
 
@@ -59,7 +60,7 @@ public final class RssiFilter {
      * @param epc      the tag, for logging
      * @param readings the tag's readings, one per antenna that heard it
      * @param antenna  the antenna a reading came from
-     * @param rssi     a reading's signal strength in signed dBm
+     * @param rssi     a reading's raw signal strength (signed dBm or positive magnitude)
      */
     public <T> Optional<List<T>> filter(String epc, List<T> readings,
                                         ToIntFunction<T> antenna, ToIntFunction<T> rssi) {
@@ -80,13 +81,19 @@ public final class RssiFilter {
             int readingAntenna = antenna.applyAsInt(reading);
             int readingRssi = rssi.applyAsInt(reading);
             Integer minimum = minimumByAntenna.get(readingAntenna);
-            if (minimum == null || readingRssi >= minimum) {
+            boolean keep = minimum == null || signedDbm(readingRssi) >= minimum;
+            if (keep) {
                 surviving.add(reading);
             } else {
-                log.debug("Reader {}: dropped reading of {} on antenna {} at {} dBm (RSSI filter {} dBm)",
-                    readerName, epc, readingAntenna, readingRssi, minimum);
+                log.debug("Reader {}: dropped reading of {} on antenna {} at {} dBm (raw RSSI {}, RSSI filter {} dBm)",
+                    readerName, epc, readingAntenna, signedDbm(readingRssi), readingRssi, minimum);
             }
         }
         return surviving.isEmpty() ? Optional.empty() : Optional.of(surviving);
+    }
+
+    /** Normalizes for comparison only; API readings retain the SDK's raw value. */
+    static int signedDbm(int raw) {
+        return raw > 0 ? -raw : raw;
     }
 }

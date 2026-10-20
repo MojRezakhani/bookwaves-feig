@@ -37,7 +37,7 @@ defaultTagFormat: DE290
 # Application log level (trace, debug, info, warn, error)
 logLevel: INFO
 
-# Optional per-logger overrides (for org.slf4j:slf4j-simple)
+# Optional per-logger overrides (Logback); package levels apply to child loggers
 # Keys are logger names (usually package or class names)
 # To show only this app logs, set global level high (e.g., WARN) and app package lower (e.g., INFO/DEBUG)
 loggers:

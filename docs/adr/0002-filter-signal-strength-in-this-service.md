@@ -16,8 +16,10 @@ applied after the fact — the approach an earlier application of ours already u
 reads were markedly more stable.
 
 The notification path also carried a stability gate, `bestRssi <= 39`, written for a
-positive "−dBm" convention. The SDK reports signed dBm (−42, −70), so every reading
-passed it, as did reads with no signal strength at all. It filtered nothing.
+positive "−dBm" convention. Assuming the SDK always reported signed dBm (−42, −70)
+led to a software filter that accepted every positive reading. A near → far → near
+experiment on an MRU102 showed positive magnitudes: 28 near, 55 far, then 28 near.
+Smaller positive values mean stronger reception on that reader.
 
 ## Decision
 
@@ -32,7 +34,10 @@ notification mode, after the reader has reported it.
   fix would rarely be turned on. Upgrading therefore switches the reader filter off on
   managed readers at their next connection.
 - **Same values, same units.** `rssiFilters` keeps its meaning — positive, in −dBm, 0 for
-  none — so existing site configuration carries over unchanged.
+  none — so existing site configuration carries over unchanged. Comparisons normalize
+  positive RSSI magnitudes to negative dBm and leave negative values unchanged. Filtering
+  and strongest-antenna selection use that same comparison. API fields retain raw RSSI;
+  `bestRssi` is the raw value of the strongest reading, not the numerically largest value.
 - **Per antenna reading, then per tag.** A reading weaker than its antenna's minimum is
   discarded; a tag is discarded only when none of its readings survive. The minimum is
   inclusive: at 60, a −60 dBm reading is kept.

@@ -233,7 +233,7 @@ public class NotificationListener implements IReaderListener, IConnectListener {
 
         log.debug("{}: {} (RSSI values: {})", sourceLogName, event.epc,
             rssiList.stream()
-                .map(r -> String.format("Ant%d:%ddBm", r.antennaNumber, r.rssi))
+                .map(r -> String.format("Ant%d:%ddBm (raw %d)", r.antennaNumber, RssiFilter.signedDbm(r.rssi), r.rssi))
                 .reduce((a, b) -> a + ", " + b)
                 .orElse("none"));
     }
@@ -269,9 +269,10 @@ public class NotificationListener implements IReaderListener, IConnectListener {
         int antenna = 0;
         int strongest = 0;
         for (NotificationEvent.AntennaRssi reading : readings) {
-            if (antenna == 0 || reading.rssi > strongest) {
+            int signed = RssiFilter.signedDbm(reading.rssi);
+            if (antenna == 0 || signed > strongest) {
                 antenna = reading.antennaNumber;
-                strongest = reading.rssi;
+                strongest = signed;
             }
         }
         return antenna;
@@ -471,15 +472,16 @@ public class NotificationListener implements IReaderListener, IConnectListener {
         return hex.toString();
     }
 
-    private static int bestRssi(List<NotificationEvent.AntennaRssi> rssiValues) {
+    static int bestRssi(List<NotificationEvent.AntennaRssi> rssiValues) {
         if (rssiValues == null || rssiValues.isEmpty()) {
             return Integer.MIN_VALUE;
         }
 
         int best = Integer.MIN_VALUE;
         for (NotificationEvent.AntennaRssi value : rssiValues) {
-            if (value != null) {
-                best = Math.max(best, value.rssi);
+            if (value != null && (best == Integer.MIN_VALUE
+                    || RssiFilter.signedDbm(value.rssi) > RssiFilter.signedDbm(best))) {
+                best = value.rssi;
             }
         }
         return best;
